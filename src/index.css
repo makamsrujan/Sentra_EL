@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Atkinson Hyperlegible', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --color-background: oklch(14% 0.01 250);
+  --color-foreground: oklch(98% 0 0);
+  --color-card: oklch(20% 0.012 250);
+  --color-card-foreground: oklch(98% 0 0);
+  --color-primary: oklch(88% 0.18 95);
+  --color-primary-foreground: oklch(15% 0.02 95);
+  --color-secondary: oklch(27% 0.015 250);
+  --color-secondary-foreground: oklch(98% 0 0);
+  --color-muted: oklch(24% 0.012 250);
+  --color-muted-foreground: oklch(80% 0.01 250);
+  --color-accent: oklch(78% 0.14 210);
+  --color-accent-foreground: oklch(15% 0.02 210);
+  --color-destructive: oklch(66% 0.22 25);
+  --color-destructive-foreground: oklch(98% 0 0);
+  --color-success: oklch(80% 0.18 150);
+  --color-border: oklch(35% 0.015 250);
+}
+
+:root {
+  --background: oklch(14% 0.01 250);
+  --foreground: oklch(98% 0 0);
+  --card: oklch(20% 0.012 250);
+  --card-foreground: oklch(98% 0 0);
+  --primary: oklch(88% 0.18 95);
+  --primary-foreground: oklch(15% 0.02 95);
+  --secondary: oklch(27% 0.015 250);
+  --secondary-foreground: oklch(98% 0 0);
+  --muted: oklch(24% 0.012 250);
+  --muted-foreground: oklch(80% 0.01 250);
+  --accent: oklch(78% 0.14 210);
+  --accent-foreground: oklch(15% 0.02 210);
+  --destructive: oklch(66% 0.22 25);
+  --destructive-foreground: oklch(98% 0 0);
+  --success: oklch(80% 0.18 150);
+  --border: oklch(35% 0.015 250);
+}
+
+@keyframes sentra-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, oklch(88% 0.18 95) 70%, transparent);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 0 22px transparent;
+    transform: scale(1.02);
+  }
+}
+
+.sentra-listening {
+  animation: 1.4s ease-in-out infinite sentra-pulse;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  touch-action: manipulation;
+}

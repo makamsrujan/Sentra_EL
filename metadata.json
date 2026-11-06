@@ -1,0 +1,1 @@
+{"name":"SENTRA","description":"Voice-first vision assistant that describes surroundings, finds objects, reads text, and remembers places by voice.","requestFramePermissions":["camera","microphone"],"majorCapabilities":["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]}
