@@ -131,75 +131,71 @@ export class WakeWordService {
     };
 
     rec.onresult = (event: any) => {
-      // Self-recognition prevention: discard speech while assistant is speaking
+      // Discard speech while assistant is currently speaking to avoid feedback loops
       if (this.isSynthesizingSpeech) return;
 
-      const lastIndex = event.results.length - 1;
-      const result = event.results[lastIndex];
-      const transcript = (result[0]?.transcript || '').trim().toLowerCase();
+      // Extract concatenated transcript across speech recognition result list
+      let fullTranscript = '';
+      let isFinal = false;
+
+      for (let i = 0; i < event.results.length; i++) {
+        fullTranscript += event.results[i][0]?.transcript || '';
+        if (event.results[i].isFinal) isFinal = true;
+      }
+      fullTranscript = fullTranscript.trim();
+      const lower = fullTranscript.toLowerCase();
 
       // Check for urgent control commands first ("Stop", "Cancel", "Repeat")
-      if (/\b(stop|halt|shut up|be quiet)\b/i.test(transcript)) {
+      if (/\b(stop|halt|shut up|be quiet)\b/i.test(lower)) {
         this.callbacks?.onCommandDetected?.('stop');
         return;
       }
-      if (/\b(cancel|never mind|abort)\b/i.test(transcript)) {
+      if (/\b(cancel|never mind|abort)\b/i.test(lower)) {
         this.callbacks?.onCommandDetected?.('cancel');
         return;
       }
-      if (/\b(repeat|say that again|what did you say)\b/i.test(transcript)) {
-        this.callbacks?.onCommandDetected?.('repeat');
-        return;
-      }
-      if (/\b(continue|go ahead|proceed)\b/i.test(transcript)) {
-        this.callbacks?.onCommandDetected?.('continue');
-        return;
-      }
 
-      // Dedicated Wake-Word Evaluation: "Hey SENTRA" or "SENTRA"
-      // Handles common speech recognition variations ("hey sentra", "sentra", "hey central", "hey sandra", "hey santa", "sandra", "central", "hey centre")
+      // Wake-Word Regex: matches "hey sentra", "sentra", "hey central", "hey sandra", etc.
       const wakeWordRegex = /\b(hey\s+sentra|hey\s+central|hey\s+sandra|hey\s+santa|hey\s+centre|hey\s+center|sentra|central|sandra)\b/i;
-      const match = transcript.match(wakeWordRegex);
+      const match = lower.match(wakeWordRegex);
 
       if (match) {
+        const matchIndex = lower.indexOf(match[0]);
         const detectedText = match[0];
-        const remainingQuery = transcript.slice(transcript.indexOf(detectedText) + detectedText.length).replace(/^[,.\s]+/, '').trim();
+        // Extract whatever user said AFTER the wake-word
+        const afterWakeWord = fullTranscript.slice(matchIndex + detectedText.length).replace(/^[,.\s]+/, '').trim();
 
-        this.clearFollowupTimeout();
-        this.setState('detected');
-
-        this.callbacks?.onWakeWordDetected({
-          phrase: 'hey_sentra',
-          confidence: result[0]?.confidence || 0.9,
-          timestamp: Date.now(),
-        });
-
-        // If user said both wake word AND their query together, e.g.: "Hey SENTRA describe what is in front of me"
-        if (remainingQuery.length > 2) {
-          setTimeout(() => {
-            this.callbacks?.onUtterance?.(remainingQuery);
-          }, 250);
-          return;
+        if (!this.followupWindowActive) {
+          this.setState('detected');
+          this.callbacks?.onWakeWordDetected({
+            phrase: 'hey_sentra',
+            confidence: 0.95,
+            timestamp: Date.now(),
+          });
+          this.startFollowupWindow(8000);
         }
 
-        // Otherwise enter active listening mode for subsequent speech
-        this.startFollowupWindow(9000);
+        // If the query has substance (user spoke right away: "Hey SENTRA find my bottle")
+        if (afterWakeWord.length > 2 && (isFinal || afterWakeWord.split(' ').length >= 2)) {
+          this.callbacks?.onUtterance?.(afterWakeWord);
+          this.clearFollowupTimeout();
+          this.setState('standby');
+          return;
+        }
         return;
       }
 
-      // If already in active follow-up listening window or just detected wake word, route utterance to user handler
-      if (this.followupWindowActive && transcript.length > 1) {
-        // Discard if it's just repetition of wake word itself or assistant's prompt
-        const clean = transcript
+      // If user paused and is now speaking inside the active follow-up window
+      if (this.followupWindowActive && fullTranscript.length > 2) {
+        const clean = fullTranscript
           .replace(wakeWordRegex, '')
           .replace(/^(yes|how can i help|help you)[,.\s]*/i, '')
           .trim();
 
-        if (clean.length > 2 && (result.isFinal || clean.split(' ').length >= 2)) {
+        if (clean.length > 2 && (isFinal || clean.split(' ').length >= 2)) {
           this.callbacks?.onUtterance?.(clean);
           this.clearFollowupTimeout();
           this.setState('standby');
-          return;
         }
       }
     };

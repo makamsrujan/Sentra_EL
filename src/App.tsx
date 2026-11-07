@@ -344,13 +344,14 @@ export default function App() {
     }
   };
 
-  // Sync speech status with WakeWordService to prevent self-recognition loops
+  // Sync speech status with WakeWordService
   useEffect(() => {
     const unregister = registerSpeechListener((speaking) => {
       if (speaking) {
         wakeWordService.notifySpeechSynthesisStart();
       } else {
-        wakeWordService.notifySpeechSynthesisEnd(true);
+        // Pass false so the assistant speaking doesn't trigger spurious follow-up loops
+        wakeWordService.notifySpeechSynthesisEnd(false);
       }
     });
     return unregister;
@@ -359,18 +360,17 @@ export default function App() {
   // Configure Wake-Word Service Callbacks (Feature 1)
   useEffect(() => {
     wakeWordService.setCallbacks({
-      onWakeWordDetected: () => {
+      onWakeWordDetected: (event) => {
         if (settings.audioFeedback) {
           playChime('start_listen');
         }
-        setAssistantResponse('Yes, how can I help?');
-        // Stop any previous speech so mic immediately hears user's next words
-        stopSpeaking();
-        speakText('Yes, how can I help?', settings.speechRate);
+        setIsListening(true);
+        setAssistantResponse('Listening…');
       },
       onUtterance: (query: string) => {
+        setIsListening(false);
         if (query && query.trim()) {
-          stopSpeaking();
+          setSpokenTranscript(query.trim());
           handleUserQuery(query.trim());
         }
       },
