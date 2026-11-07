@@ -7,4 +7,8 @@ coverage/
 .env*
 !.env.example
 .antigravity/
+data/
+*.db
+*.db-wal
+*.db-shm
 

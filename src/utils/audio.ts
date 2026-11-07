@@ -88,6 +88,25 @@ export function playChime(type: 'start_listen' | 'stop_listen' | 'found' | 'haza
   }
 }
 
+type SpeechStateListener = (speaking: boolean) => void;
+const speechListeners: SpeechStateListener[] = [];
+
+export function registerSpeechListener(listener: SpeechStateListener): () => void {
+  speechListeners.push(listener);
+  return () => {
+    const idx = speechListeners.indexOf(listener);
+    if (idx >= 0) speechListeners.splice(idx, 1);
+  };
+}
+
+function notifySpeechState(speaking: boolean) {
+  speechListeners.forEach((fn) => {
+    try {
+      fn(speaking);
+    } catch {}
+  });
+}
+
 /**
  * Text-to-speech speaker using window.speechSynthesis
  */
@@ -96,7 +115,10 @@ export function speakText(text: string, rate = 1.05, onEnd?: () => void) {
 
   try {
     window.speechSynthesis.cancel();
-    if (!text || text.trim() === '') return;
+    if (!text || text.trim() === '') {
+      notifySpeechState(false);
+      return;
+    }
 
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = rate;
@@ -112,14 +134,24 @@ export function speakText(text: string, rate = 1.05, onEnd?: () => void) {
       utterance.voice = preferredVoice;
     }
 
-    if (onEnd) {
-      utterance.onend = onEnd;
-      utterance.onerror = () => onEnd();
-    }
+    utterance.onstart = () => {
+      notifySpeechState(true);
+    };
+
+    utterance.onend = () => {
+      notifySpeechState(false);
+      if (onEnd) onEnd();
+    };
+
+    utterance.onerror = () => {
+      notifySpeechState(false);
+      if (onEnd) onEnd();
+    };
 
     window.speechSynthesis.speak(utterance);
   } catch (err) {
     console.warn('SpeechSynthesis error:', err);
+    notifySpeechState(false);
   }
 }
 
@@ -127,6 +159,7 @@ export function stopSpeaking() {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
+  notifySpeechState(false);
 }
 
 export function isSpeaking(): boolean {

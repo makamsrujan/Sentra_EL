@@ -4,8 +4,13 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
+import { initDatabase, db } from './server/db.js';
+import apiRouter from './server/routes.js';
 
 dotenv.config();
+
+// Initialize SQLite database
+initDatabase();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,6 +20,9 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '40mb' }));
 app.use(express.urlencoded({ extended: true, limit: '40mb' }));
+
+// Mount Database and Auth API routes
+app.use('/api', apiRouter);
 
 // In-memory Wearable State & Gateway Queue (Round 3 Architecture)
 interface WearableServerState {
@@ -343,6 +351,31 @@ app.post('/api/device/telemetry', (req, res) => {
       });
     }
 
+    // Persist to telemetry_logs table in database
+    try {
+      db.prepare(`
+        INSERT INTO telemetry_logs (
+          device_id, battery_level, battery_charging, forward_tof_cm,
+          downward_cliff_mm, imu_json, head_pitch, earphone_connected,
+          audio_volume, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        wearableState.deviceId || 'ESP32-S3-SENTRA-001',
+        wearableState.batteryLevel,
+        wearableState.batteryCharging ? 1 : 0,
+        wearableState.forwardToFDistanceCm,
+        wearableState.downwardCliffSensorMm,
+        JSON.stringify(wearableState.imu || {}),
+        wearableState.headPitchAngle || 0,
+        wearableState.earphoneConnected ? 1 : 0,
+        wearableState.audioVolume || 80,
+        Date.now()
+      );
+    } catch (dbErr) {
+      // Non-blocking telemetry log
+      console.warn('[DB] Failed to log telemetry:', dbErr);
+    }
+
     res.json({
       ok: true,
       received: true,
@@ -403,6 +436,100 @@ app.post('/api/device/simulate', (req, res) => {
     res.json({ ok: true, telemetry: wearableState });
   } catch (err: any) {
     res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+// Real-Time Streaming AI Conversation (Feature 2: Gemini Live / Streaming API)
+app.post('/api/sentra/chat/stream', async (req, res) => {
+  const {
+    query = '',
+    image = null,
+    mode = 'ask',
+    goal = null,
+    memory = [],
+    history = [],
+    heading = null,
+    sensors = '',
+    useWearableFrame = false,
+  } = req.body;
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    const fallback = getIntelligentFallback(mode, query, goal, sensors, memory);
+    res.write(`data: ${JSON.stringify({ chunk: fallback.spokenResponse, isComplete: true, fullText: fallback.spokenResponse, fallbackData: fallback })}\n\n`);
+    res.end();
+    return;
+  }
+
+  try {
+    const frameToAnalyze = useWearableFrame && wearableState.latestFrame ? wearableState.latestFrame : image;
+    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
+
+    if (frameToAnalyze && typeof frameToAnalyze === 'string') {
+      const match = frameToAnalyze.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        parts.push({
+          inlineData: {
+            mimeType: match[1] || 'image/jpeg',
+            data: match[2],
+          },
+        });
+      }
+    }
+
+    let promptContext = `You are SENTRA, a voice-first conversational environmental assistant for visually impaired individuals.\n`;
+    promptContext += `Operate under the pipeline: UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE.\n`;
+    promptContext += `Rules:\n`;
+    promptContext += `1. Respond in natural, calm, spoken sentences (1-3 sentences). Do NOT output markdown formatting, asterisks, or raw technical coordinates.\n`;
+    promptContext += `2. Use intuitive clock positions (e.g. "at your 1 o'clock", "straight ahead at 12 o'clock") and human distance (e.g. "two steps ahead", "at arm's reach").\n`;
+    promptContext += `3. Clearly differentiate current visual observations from remembered past information.\n`;
+    promptContext += `4. Never invent objects, obstacles, destinations, or successful task completions.\n`;
+
+    if (goal) promptContext += `ACTIVE USER GOAL: "${goal}"\n`;
+    if (query) promptContext += `USER SPOKEN QUERY: "${query}"\n`;
+    if (heading != null) promptContext += `COMPASS HEADING: ${Math.round(heading)}°\n`;
+    if (wearableState.connected) {
+      promptContext += `WEARABLE SENSORS: Forward ToF ${wearableState.forwardToFDistanceCm}cm, Cliff ${wearableState.downwardCliffSensorMm}mm\n`;
+    }
+    if (memory && memory.length > 0) {
+      promptContext += `SAVED MEMORIES: ${memory.slice(-5).map((m: any) => `[${m.source || 'historical'}] ${m.label}: ${m.note}`).join('; ')}\n`;
+    }
+    if (history && history.length > 0) {
+      promptContext += `RECENT CONVERSATION:\n${history.slice(-4).map((h: any) => `${h.role === 'user' ? 'User' : 'SENTRA'}: ${h.text}`).join('\n')}\n`;
+    }
+    if (!frameToAnalyze) {
+      promptContext += `NOTE: Camera is inactive. If asked about the current scene, tell the user you cannot see their surroundings right now.\n`;
+    }
+
+    parts.push({ text: promptContext });
+
+    const responseStream = await ai.models.generateContentStream({
+      model: 'gemini-3.8-flash',
+      contents: parts,
+      config: {
+        maxOutputTokens: 300,
+        temperature: 0.6,
+      },
+    });
+
+    let fullText = '';
+    for await (const chunk of responseStream) {
+      const text = chunk.text || '';
+      fullText += text;
+      res.write(`data: ${JSON.stringify({ chunk: text, isComplete: false, fullText })}\n\n`);
+    }
+
+    res.write(`data: ${JSON.stringify({ chunk: '', isComplete: true, fullText })}\n\n`);
+    res.end();
+  } catch (err: any) {
+    console.error('Streaming conversation error:', err);
+    const fallback = getIntelligentFallback(mode, query, goal, sensors, memory);
+    res.write(`data: ${JSON.stringify({ chunk: fallback.spokenResponse, isComplete: true, fullText: fallback.spokenResponse, fallbackData: fallback })}\n\n`);
+    res.end();
   }
 });
 

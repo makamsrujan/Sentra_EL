@@ -14,7 +14,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { analyzeFrameQuality, formatSensorsString, getCompassDirection } from '../utils/sensors';
-import { DetectedObject, FrameQuality, HazardAlert } from '../types/sentra';
+import { DetectedObject, FrameQuality, HazardAlert, TrackedObject, SlamTrackingStatus, PerceptionMode } from '../types/sentra';
 import { generateDemoRoomDataUrl } from '../utils/demoRoom';
 
 export interface CameraViewHandle {
@@ -35,11 +35,15 @@ interface CameraViewProps {
   facingMode: 'environment' | 'user';
   onToggleFacingMode: () => void;
   detectedObjects?: DetectedObject[];
+  trackedObjects?: TrackedObject[];
   hazard?: HazardAlert | null;
   activePerceptionPrompt?: string | null;
   useWearableFeed?: boolean;
   wearableFrame?: string | null;
   onCameraStatusChange?: (active: boolean) => void;
+  slamStatus?: SlamTrackingStatus;
+  slamFeatureCount?: number;
+  perceptionMode?: PerceptionMode;
 }
 
 export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
@@ -50,11 +54,15 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
       facingMode,
       onToggleFacingMode,
       detectedObjects = [],
+      trackedObjects = [],
       hazard = null,
       activePerceptionPrompt = null,
       useWearableFeed = false,
       wearableFrame = null,
       onCameraStatusChange,
+      slamStatus,
+      slamFeatureCount = 0,
+      perceptionMode = 'online_gemini',
     },
     ref
   ) => {
@@ -370,8 +378,14 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                 obj.isTargetGoal ||
                 Boolean(findingGoal && obj.label.toLowerCase().includes(findingGoal.toLowerCase()));
 
+              const matchedTrack = trackedObjects.find((t) => t.label.toLowerCase() === obj.label.toLowerCase());
+
               const strokeColor = isTarget ? '#ffd15c' : '#7dd3fc';
               const fillColor = isTarget ? 'rgba(255, 209, 92, 0.15)' : 'rgba(125, 211, 252, 0.12)';
+
+              const trackTag = matchedTrack
+                ? `[${matchedTrack.trackId}] ${matchedTrack.movement !== 'stationary' ? `(${matchedTrack.movement})` : ''}`
+                : '';
 
               return (
                 <g key={obj.id}>
@@ -390,14 +404,14 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                   {/* Corner accent reticles */}
                   <circle cx={xmin} cy={ymin} r="4" fill={strokeColor} />
                   <circle cx={xmin + width} cy={ymin} r="4" fill={strokeColor} />
-                  <circle cx={xmin} cy={ymin + height} r="4" fill={strokeColor} />
                   <circle cx={xmin + width} cy={ymin + height} r="4" fill={strokeColor} />
+                  <circle cx={xmin} cy={ymin + height} r="4" fill={strokeColor} />
 
                   {/* Object label background pill */}
                   <rect
                     x={xmin}
                     y={Math.max(8, ymin - 38)}
-                    width={Math.min(380, Math.max(120, obj.label.length * 15 + 85))}
+                    width={Math.min(460, Math.max(140, (obj.label.length + trackTag.length) * 14 + 75))}
                     height="32"
                     fill="#14151a"
                     stroke={strokeColor}
@@ -405,16 +419,16 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                     rx="8"
                     opacity="0.94"
                   />
-                  {/* Label & confidence text */}
+                  {/* Label & confidence text with Temporal Track */}
                   <text
                     x={xmin + 10}
                     y={Math.max(28, ymin - 16)}
                     fill={isTarget ? '#ffd15c' : '#ffffff'}
-                    fontSize="17"
+                    fontSize="16"
                     fontWeight="bold"
                     fontFamily="sans-serif"
                   >
-                    {obj.label} ({Math.round(obj.confidence * 100)}%) • {obj.clockPosition}
+                    {obj.label} {trackTag} ({Math.round(obj.confidence * 100)}%) • {obj.clockPosition}
                   </text>
                 </g>
               );
@@ -472,6 +486,38 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                   />
                 </label>
               </div>
+            </div>
+          </div>
+        )}
+
+        {/* SLAM Odometry & Perception Mode Status Badges in Top-Right */}
+        {(isCameraActive || isDemoFeedActive || useWearableFeed) && (
+          <div className="absolute top-3 right-3 z-20 flex flex-col items-end gap-1.5 pointer-events-none">
+            {slamStatus && (
+              <div className="flex items-center gap-1.5 rounded-full bg-background/85 backdrop-blur-md px-2.5 py-1 text-[10px] font-bold border border-border/50 text-foreground shadow-sm">
+                <span
+                  className={`h-2 w-2 rounded-full ${
+                    slamStatus === 'tracking'
+                      ? 'bg-emerald-400 animate-pulse'
+                      : slamStatus === 'degraded'
+                      ? 'bg-amber-400'
+                      : 'bg-rose-400'
+                  }`}
+                />
+                <span className="uppercase">SLAM: {slamStatus}</span>
+                {slamFeatureCount > 0 && <span className="text-muted-foreground font-mono">({slamFeatureCount} pts)</span>}
+              </div>
+            )}
+
+            <div className="flex items-center gap-1 rounded-full bg-background/85 backdrop-blur-md px-2.5 py-0.5 text-[10px] font-bold border border-border/50 shadow-sm">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  perceptionMode === 'offline_local' ? 'bg-amber-400' : 'bg-primary animate-pulse'
+                }`}
+              />
+              <span className="text-muted-foreground">
+                {perceptionMode === 'offline_local' ? 'Offline Local Vision' : 'Online Gemini 3.8'}
+              </span>
             </div>
           </div>
         )}
