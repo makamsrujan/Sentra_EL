@@ -27,6 +27,7 @@ import {
   TrackedObject,
   SlamState,
   NavigationRoute,
+  NavigationNode,
   LocalVisionAnalysis,
   WakeWordState,
   PerceptionMode,
@@ -92,7 +93,7 @@ const DEFAULT_SETTINGS: SentraSettings = {
   hapticFeedback: true,
   cameraFacing: 'environment',
   autoContinuousFind: true,
-  wakeWordEnabled: false,
+  wakeWordEnabled: true, // "Hey SENTRA" enabled by default
   selectedInputSource: 'browser_camera',
   streamingVoiceEnabled: true,
   wakeWordSensitivity: 0.7,
@@ -363,9 +364,12 @@ export default function App() {
           playChime('start_listen');
         }
         setAssistantResponse('Yes, how can I help?');
-        speakText('Yes, how can I help?', settings.speechRate, () => {
-          startListening();
-        });
+        speakText('Yes, how can I help?', settings.speechRate);
+      },
+      onUtterance: (query: string) => {
+        if (query && query.trim()) {
+          handleUserQuery(query.trim());
+        }
       },
       onCommandDetected: (cmd) => {
         if (cmd === 'stop' || cmd === 'cancel') {
@@ -406,17 +410,17 @@ export default function App() {
   // Configure Temporal Tracker Callbacks (Feature 3)
   useEffect(() => {
     temporalTracker.setCallbacks({
-      onTargetLost: (_id, label) => {
+      onTargetLost: (targetLabel: string, _lastClockPosition: string) => {
         if (
           currentGoal &&
           currentGoal.targetObject &&
-          label.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
+          targetLabel.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
         ) {
           const step: VerificationStep = {
             id: `step-${Date.now()}`,
             timestamp: Date.now(),
             stepName: 'Target Lost Alert',
-            note: `${label} moved out of the active camera field of view. Slowly pan to re-acquire.`,
+            note: `${targetLabel} moved out of the active camera field of view. Slowly pan to re-acquire.`,
             state: 'need_observation',
             outcome: 're_aim_needed',
           };
@@ -431,11 +435,11 @@ export default function App() {
           );
         }
       },
-      onTargetReacquired: (_id, label) => {
+      onTargetReacquired: (target: TrackedObject) => {
         if (
           currentGoal &&
           currentGoal.targetObject &&
-          label.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
+          target.label.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
         ) {
           if (settings.audioFeedback) {
             playChime('capture');
@@ -534,7 +538,7 @@ export default function App() {
   const handleNavigateToDestination = (destName: string) => {
     const nodes = indoorNavigation.getAllNodes();
     const targetNode = nodes.find(
-      (n) =>
+      (n: NavigationNode) =>
         n.name.toLowerCase().includes(destName.toLowerCase()) ||
         n.room.toLowerCase().includes(destName.toLowerCase())
     );
@@ -547,10 +551,10 @@ export default function App() {
     }
 
     const startNode =
-      indoorNavigation.findNearestNode(slamState.pose.x, slamState.pose.z) || nodes[0];
-    const route = indoorNavigation.planRoute(startNode.id, targetNode.id);
+      indoorNavigation.findNearestNodeByCoords(slamState.pose.x, slamState.pose.z) || nodes[0];
+    const route = indoorNavigation.planRoute(startNode.name, targetNode.name);
 
-    if (route && route.path.length > 0) {
+    if (route && route.steps && route.steps.length > 0) {
       setActiveRoute(route);
       const firstStepText = indoorNavigation.formatGuidanceStep(route.steps[0]);
       const guidance = `Navigating to ${targetNode.name}. ${firstStepText}. Caution: Keep white cane sweeping.`;
@@ -571,7 +575,7 @@ export default function App() {
             id: `step-${Date.now()}`,
             timestamp: Date.now(),
             stepName: 'Path Computed',
-            note: `A* route found (${route.steps.length} checkpoints, ~${Math.round(route.totalDistanceMeters)}m).`,
+            note: `A* route found (${route.steps.length} checkpoints, ~${route.totalSteps} steps).`,
             state: 'active',
             outcome: 'success',
           },
@@ -1461,30 +1465,50 @@ export default function App() {
           </button>
 
           {/* Hands-Free Wake-Word Status Bar */}
-          {settings.wakeWordEnabled && (
-            <div className="flex items-center justify-between rounded-xl bg-secondary/80 px-3 py-2 text-xs font-semibold text-muted-foreground border border-border/50">
-              <span className="flex items-center gap-1.5">
-                <span
-                  className={`h-2 w-2 rounded-full ${
-                    wakeWordState === 'listening'
-                      ? 'bg-primary animate-ping'
-                      : wakeWordState === 'standby'
-                      ? 'bg-success'
-                      : 'bg-muted-foreground'
-                  }`}
-                />
-                <span>
-                  Hands-Free:{' '}
-                  {wakeWordState === 'standby'
-                    ? 'Say "Hey SENTRA"'
-                    : wakeWordState === 'listening'
-                    ? 'Listening for command…'
-                    : wakeWordState}
-                </span>
+          <div className="flex items-center justify-between rounded-xl bg-secondary/80 px-3 py-2 text-xs font-semibold text-muted-foreground border border-border/50">
+            <button
+              onClick={() => {
+                const next = !settings.wakeWordEnabled;
+                updateSettings({ ...settings, wakeWordEnabled: next });
+              }}
+              className="flex items-center gap-1.5 hover:text-foreground cursor-pointer transition text-left"
+              title="Click to toggle Hey SENTRA wake word"
+            >
+              <span
+                className={`h-2.5 w-2.5 rounded-full ${
+                  !settings.wakeWordEnabled
+                    ? 'bg-neutral-500'
+                    : wakeWordState === 'listening' || wakeWordState === 'detected'
+                    ? 'bg-primary animate-ping'
+                    : wakeWordState === 'standby'
+                    ? 'bg-emerald-400'
+                    : 'bg-amber-400'
+                }`}
+              />
+              <span>
+                {!settings.wakeWordEnabled
+                  ? 'Wake Word: Paused (Tap to enable)'
+                  : wakeWordState === 'standby'
+                  ? 'Say "Hey SENTRA"'
+                  : wakeWordState === 'listening'
+                  ? 'Listening for command…'
+                  : `Wake Word: ${wakeWordState}`}
               </span>
-              <span className="text-[11px] text-primary font-mono">Continuous</span>
-            </div>
-          )}
+            </button>
+            <button
+              onClick={() => {
+                const next = !settings.wakeWordEnabled;
+                updateSettings({ ...settings, wakeWordEnabled: next });
+              }}
+              className={`text-[11px] font-mono px-2 py-0.5 rounded cursor-pointer transition ${
+                settings.wakeWordEnabled
+                  ? 'bg-emerald-950/60 border border-emerald-500/40 text-emerald-300'
+                  : 'bg-neutral-800 text-neutral-400 hover:text-white'
+              }`}
+            >
+              {settings.wakeWordEnabled ? 'Active' : 'Turn On'}
+            </button>
+          </div>
 
           {/* Quick Voice Mode Buttons Grid */}
           <div className="grid grid-cols-2 gap-2.5">

@@ -16,6 +16,7 @@ import { WakeWordEvent, WakeWordState } from '../types/sentra';
 export interface WakeWordCallbacks {
   onWakeWordDetected: (event: WakeWordEvent) => void;
   onCommandDetected?: (command: 'stop' | 'repeat' | 'cancel' | 'continue') => void;
+  onUtterance?: (utterance: string) => void;
   onStateChange: (state: WakeWordState) => void;
   onError: (error: string) => void;
 }
@@ -156,13 +157,13 @@ export class WakeWordService {
       }
 
       // Dedicated Wake-Word Evaluation: "Hey SENTRA" or "SENTRA"
-      // Matches both interim and final results immediately
-      const wakeWordRegex = /\b(hey sentra|hey central|hey sandra|sentra|central)\b/i;
+      // Handles common speech recognition variations ("hey sentra", "sentra", "hey central", "hey sandra", "hey santa", "sandra", "central", "hey centre")
+      const wakeWordRegex = /\b(hey\s+sentra|hey\s+central|hey\s+sandra|hey\s+santa|hey\s+centre|hey\s+center|sentra|central|sandra)\b/i;
       const match = transcript.match(wakeWordRegex);
 
       if (match) {
         const detectedText = match[0];
-        const remainingQuery = transcript.slice(transcript.indexOf(detectedText) + detectedText.length).trim();
+        const remainingQuery = transcript.slice(transcript.indexOf(detectedText) + detectedText.length).replace(/^[,.\s]+/, '').trim();
 
         this.clearFollowupTimeout();
         this.setState('detected');
@@ -173,18 +174,24 @@ export class WakeWordService {
           timestamp: Date.now(),
         });
 
-        // If the user already provided their query in the same breath (e.g. "Hey SENTRA, what is around me?")
+        // If user said both wake word AND their query together, e.g.: "Hey SENTRA describe what is in front of me"
         if (remainingQuery.length > 2) {
-          // Deliver remaining query
+          setTimeout(() => {
+            this.callbacks?.onUtterance?.(remainingQuery);
+          }, 250);
+          return;
         }
 
-        // Transition to active listening
-        setTimeout(() => {
-          if (this.isRunning) {
-            this.setState('listening');
-            this.startFollowupWindow(10000);
-          }
-        }, 300);
+        // Otherwise enter active listening mode for subsequent speech
+        this.startFollowupWindow(9000);
+        return;
+      }
+
+      // If already in active follow-up listening window, route utterance to user handler
+      if (this.followupWindowActive && result.isFinal && transcript.length > 2) {
+        this.callbacks?.onUtterance?.(transcript);
+        this.clearFollowupTimeout();
+        this.setState('standby');
       }
     };
 
