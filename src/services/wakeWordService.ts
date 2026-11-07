@@ -187,11 +187,20 @@ export class WakeWordService {
         return;
       }
 
-      // If already in active follow-up listening window, route utterance to user handler
-      if (this.followupWindowActive && result.isFinal && transcript.length > 2) {
-        this.callbacks?.onUtterance?.(transcript);
-        this.clearFollowupTimeout();
-        this.setState('standby');
+      // If already in active follow-up listening window or just detected wake word, route utterance to user handler
+      if (this.followupWindowActive && transcript.length > 1) {
+        // Discard if it's just repetition of wake word itself or assistant's prompt
+        const clean = transcript
+          .replace(wakeWordRegex, '')
+          .replace(/^(yes|how can i help|help you)[,.\s]*/i, '')
+          .trim();
+
+        if (clean.length > 2 && (result.isFinal || clean.split(' ').length >= 2)) {
+          this.callbacks?.onUtterance?.(clean);
+          this.clearFollowupTimeout();
+          this.setState('standby');
+          return;
+        }
       }
     };
 

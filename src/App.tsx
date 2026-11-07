@@ -364,10 +364,13 @@ export default function App() {
           playChime('start_listen');
         }
         setAssistantResponse('Yes, how can I help?');
+        // Stop any previous speech so mic immediately hears user's next words
+        stopSpeaking();
         speakText('Yes, how can I help?', settings.speechRate);
       },
       onUtterance: (query: string) => {
         if (query && query.trim()) {
+          stopSpeaking();
           handleUserQuery(query.trim());
         }
       },

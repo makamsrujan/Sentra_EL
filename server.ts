@@ -481,13 +481,16 @@ app.post('/api/sentra/chat/stream', async (req, res) => {
       }
     }
 
-    let promptContext = `You are SENTRA, a voice-first conversational environmental assistant for visually impaired individuals.\n`;
-    promptContext += `Operate under the pipeline: UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE.\n`;
-    promptContext += `Rules:\n`;
-    promptContext += `1. Respond in natural, calm, spoken sentences (1-3 sentences). Do NOT output markdown formatting, asterisks, or raw technical coordinates.\n`;
-    promptContext += `2. Use intuitive clock positions (e.g. "at your 1 o'clock", "straight ahead at 12 o'clock") and human distance (e.g. "two steps ahead", "at arm's reach").\n`;
-    promptContext += `3. Clearly differentiate current visual observations from remembered past information.\n`;
-    promptContext += `4. Never invent objects, obstacles, destinations, or successful task completions.\n`;
+    let promptContext = `You are SENTRA, a voice-first assistive AI companion for visually impaired individuals.
+You excel at:
+1. SPATIAL MEMORY: Recalling previously observed objects, where they were left, landmarks, and spatial layout with honest verification ("I remember leaving your keys on the study desk, but looking forward now I see...").
+2. GOAL-ORIENTED ASSISTANCE: Continuously guiding the user to locate objects or destinations step-by-step with clock directions and active perception directives ("Turn 45 degrees left", "Tilt camera slightly down").
+
+Strict Spoken Rules:
+1. Answer directly and concisely in 1 to 2 clear spoken sentences. No fluff, no markdown.
+2. State spatial locations using clock positions ("at 1 o'clock", "straight ahead at 12 o'clock") and human distance ("two steps ahead", "at arm's reach").
+3. Actively help achieve the user's active goal or memory question immediately.
+`;
 
     if (goal) promptContext += `ACTIVE USER GOAL: "${goal}"\n`;
     if (query) promptContext += `USER SPOKEN QUERY: "${query}"\n`;
@@ -496,13 +499,13 @@ app.post('/api/sentra/chat/stream', async (req, res) => {
       promptContext += `WEARABLE SENSORS: Forward ToF ${wearableState.forwardToFDistanceCm}cm, Cliff ${wearableState.downwardCliffSensorMm}mm\n`;
     }
     if (memory && memory.length > 0) {
-      promptContext += `SAVED MEMORIES: ${memory.slice(-5).map((m: any) => `[${m.source || 'historical'}] ${m.label}: ${m.note}`).join('; ')}\n`;
+      promptContext += `SPATIAL MEMORIES IN DATABASE (${memory.length} items):\n${memory.slice(-8).map((m: any) => `* [${m.source || 'historical'}] "${m.label}": ${m.note} (Room: ${m.room || 'General Space'}, Heading: ${m.heading != null ? m.heading + '°' : 'unknown'})`).join('\n')}\n`;
     }
     if (history && history.length > 0) {
-      promptContext += `RECENT CONVERSATION:\n${history.slice(-4).map((h: any) => `${h.role === 'user' ? 'User' : 'SENTRA'}: ${h.text}`).join('\n')}\n`;
+      promptContext += `RECENT DIALOGUE:\n${history.slice(-4).map((h: any) => `${h.role === 'user' ? 'User' : 'SENTRA'}: ${h.text}`).join('\n')}\n`;
     }
     if (!frameToAnalyze) {
-      promptContext += `NOTE: Camera is inactive. If asked about the current scene, tell the user you cannot see their surroundings right now.\n`;
+      promptContext += `NOTE: Camera frame is currently unavailable. Answer based on memory or prompt user to start camera.\n`;
     }
 
     parts.push({ text: promptContext });
@@ -604,9 +607,9 @@ app.post('/api/sentra/analyze', async (req, res) => {
     }
 
     if (memory && Array.isArray(memory) && memory.length > 0) {
-      promptContext += `SAVED CONTEXTUAL MEMORIES (${memory.length} items):\n`;
-      memory.slice(-5).forEach((m) => {
-        promptContext += `- [${m.source || 'historical'}] ${m.label}: ${m.note} (Heading: ${m.heading != null ? Math.round(m.heading) + '°' : 'unknown'})\n`;
+      promptContext += `SPATIAL & CONTEXTUAL MEMORIES IN DATABASE (${memory.length} items):\n`;
+      memory.slice(-10).forEach((m) => {
+        promptContext += `- [${m.source || 'historical'}] "${m.label}": ${m.note} (Room: ${m.room || 'General Space'}, Heading: ${m.heading != null ? Math.round(m.heading) + '°' : 'unknown'})\n`;
       });
     }
 
