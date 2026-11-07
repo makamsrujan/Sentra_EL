@@ -1002,7 +1002,13 @@ export default function App() {
       return;
     }
 
-    // Feature 2: Real-time Streaming AI Conversation
+    // When user asks to find, locate, describe, or search for objects, execute full visual analysis with bounding boxes & confidence
+    if (intent.mode === 'find' || intent.mode === 'describe' || intent.mode === 'navigate') {
+      await executeAnalysis(intent.mode, queryText, intent.goal || currentGoal?.targetObject);
+      return;
+    }
+
+    // Feature 2: Real-time Streaming AI Conversation for general open-ended conversational questions
     if (settings.streamingVoiceEnabled && intent.mode !== 'remember') {
       setIsProcessing(true);
       const capture = cameraRef.current?.captureFrame() || { dataUrl: null, quality: null };
