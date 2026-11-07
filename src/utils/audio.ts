@@ -108,6 +108,19 @@ function notifySpeechState(speaking: boolean) {
 }
 
 /**
+ * Clean spoken text of any residual markdown or symbols to ensure clear vocalization
+ */
+function cleanSpeechText(raw: string): string {
+  return raw
+    .replace(/\*+/g, '') // remove markdown bold/italics
+    .replace(/#+/g, '') // remove headings
+    .replace(/[`_~]/g, '') // remove code marks, underscores, strikethroughs
+    .replace(/\[\d+\]/g, '') // remove citation brackets
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
  * Text-to-speech speaker using window.speechSynthesis
  */
 export function speakText(text: string, rate = 1.05, onEnd?: () => void) {
@@ -115,20 +128,22 @@ export function speakText(text: string, rate = 1.05, onEnd?: () => void) {
 
   try {
     window.speechSynthesis.cancel();
-    if (!text || text.trim() === '') {
+    const cleaned = cleanSpeechText(text);
+    if (!cleaned) {
       notifySpeechState(false);
       return;
     }
 
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.rate = rate;
+    const utterance = new SpeechSynthesisUtterance(cleaned);
+    utterance.rate = Math.min(1.15, Math.max(0.9, rate));
     utterance.pitch = 1.0;
 
-    // Pick a natural English voice if available
+    // Pick the highest clarity natural English voice
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice = voices.find(
-      (v) => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Neural') || v.name.includes('Google') || v.name.includes('Siri'))
-    ) || voices.find((v) => v.lang.startsWith('en'));
+    const preferredVoice =
+      voices.find((v) => v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Daniel') || v.name.includes('Natural') || v.name.includes('Google'))) ||
+      voices.find((v) => v.lang.startsWith('en-US') || v.lang.startsWith('en-GB')) ||
+      voices.find((v) => v.lang.startsWith('en'));
 
     if (preferredVoice) {
       utterance.voice = preferredVoice;
