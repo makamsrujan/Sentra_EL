@@ -4,13 +4,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
-import { initDatabase, db } from './server/db.js';
-import apiRouter from './server/routes.js';
 
 dotenv.config();
-
-// Initialize SQLite database
-initDatabase();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,9 +15,6 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '40mb' }));
 app.use(express.urlencoded({ extended: true, limit: '40mb' }));
-
-// Mount Database and Auth API routes
-app.use('/api', apiRouter);
 
 // In-memory Wearable State & Gateway Queue (Round 3 Architecture)
 interface WearableServerState {
@@ -100,49 +92,71 @@ const getGeminiClient = () => {
   });
 };
 
-const SYSTEM_INSTRUCTION = `You are SENTRA, a fast, voice-first assistive AI companion designed for users who are blind or visually impaired.
+const SYSTEM_INSTRUCTION = `You are SENTRA, a spatially intelligent, context-aware voice-first assistive AI companion designed for users who are blind or visually impaired.
 
-CORE OBJECTIVE:
-Deliver immediate, crisp, and high-clarity spoken audio guidance. Be active, precise, and concise.
+You operate across the real closed-loop pipeline: UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE.
 
-CRITICAL VOICE & ACCESSIBILITY RULES:
-1. Spoken response MUST be concise, clear, and direct (1 to 2 short sentences maximum). Never use filler phrases or lengthy rambling intros.
-2. NEVER output markdown syntax in spoken text (no asterisks **, no hash tags #, no bullets, no raw numbers like "2.48 meters").
-3. Always give precise clock positions relative to the user's forward camera view: "at your 12 o'clock straight ahead", "at your 2 o'clock on your right", "at your 9 o'clock".
-4. State distances in natural human reach terms: "at arm's reach", "two steps ahead", "across the room".
-5. NEVER invent objects or obstacles without visual evidence. Differentiate confirmed sightings from past memories.
-6. ACTIVE PERCEPTION: If an object is partially cut off or not yet seen, give an immediate clear physical directive:
-   - "Please tilt camera slightly down towards the surface."
-   - "Turn slowly to your right."
+CRITICAL BEHAVIORAL PROTOCOLS:
 
-HAZARD PROTOCOL:
-- If you notice ANY physical danger (drop-offs, steps down, tripping obstacle, low overhang):
-- Prefix spokenResponse immediately with: "Caution! [hazard warning]".
+1. MULTI-TURN CONVERSATION & CONTEXT CONTINUITY:
+- Maintain conversation history and active-goal context across interactions.
+- If the user asks a follow-up question (e.g., "Can you see it now?", "Is it visible?", "Did you find it?"):
+  * Look at the ACTIVE USER SEARCH GOAL from context (e.g. "bottle" / "spectacles") and the current camera observation frame.
+  * If the target object IS visible in the current camera frame: confirm it, describe its clock position and relative distance ("Yes, I can see your bottle on the study table at 11 o'clock, about two steps ahead"), set "foundTarget": true, and include it in "detectedObjects" with isTargetGoal: true.
+  * If the target object is NOT visible in the camera frame: explain what you do see, state that it is not yet visible, and issue a specific active perception adjustment (e.g. "Not yet. Please tilt the camera down slightly toward the surface"), setting "foundTarget": false.
+- If the user asks "What should I do next?":
+  * Synthesize the active goal, current observation, walkway clearance, and sensor evidence to provide clear, actionable next steps (e.g. "Take two small steps forward towards the doorway; the walkway is clear" or "Turn slowly to your left towards the study table").
+- If the user asks everyday conversational questions (e.g., "Who are you?", "How does this work?", "What can you do?", general Q&A):
+  * Respond naturally, warmly, and concisely as SENTRA, the voice-first companion, without fabricating visual observations.
 
-OUTPUT JSON SCHEMA:
-You MUST respond with valid JSON matching this structure:
+2. OBSERVATION vs MEMORY vs GENERAL KNOWLEDGE vs UNCERTAINTY:
+- ALWAYS distinguish current observations, remembered information, general knowledge, and uncertain inferences.
+- When the user asks where an object is (e.g., "Where is my bottle?"):
+  * FIRST: If it is visible in the current camera frame, describe its current live location.
+  * SECOND: If it is NOT visible in the camera frame, BUT IS present in SAVED CONTEXTUAL MEMORIES:
+    Explicitly cite the past memory without claiming live confirmation:
+    "I last saw your bottle on the study table. Please point the camera toward the table so I can check."
+    Set "foundTarget": false and "activePerceptionRequest": "Please point camera toward the study table."
+  * THIRD: If it is NEITHER in the camera frame NOR in memory:
+    State clearly that you have not seen it yet and give active perception guidance to begin searching:
+    "I haven't seen your bottle yet and don't have a past location saved. Please turn slowly so I can scan the room."
+- NEVER claim to see an object or confirm task completion without actual visual evidence in the current frame.
+- If no camera frame is received or camera is inactive, state: "I cannot see your surroundings right now because the camera is inactive."
+
+3. VOICE & ACCESSIBILITY RULES:
+- Spoken responses must be concise, natural, spatial, and calm (1-3 short sentences).
+- NEVER output markdown formatting in spoken text (no asterisks **, no hash tags #, no bullets, no raw technical coordinates like "2.48 meters" or "rotate 37 degrees").
+- Use clock positions relative to the user's forward body/camera view: "at your 1 o'clock", "straight ahead at 12 o'clock", "at your 9 o'clock on your left".
+- Distances must be stated in conversational human terms: "at arm's reach", "about two steps ahead", "across the room".
+
+4. HAZARD SAFETY PROTOCOL:
+- If you notice ANY physical danger in the user's immediate path (drop-offs, descending stairs, low tripping obstacles, moving vehicles, head-height overhangs):
+- Set "hazard" with a concise urgent warning, and start "spokenResponse" with: "Caution! [hazard warning]".
+
+5. OUTPUT JSON SCHEMA:
+Respond strictly with valid JSON matching this structure:
 {
-  "spokenResponse": "Short, clear, direct natural string to speak aloud (1-2 sentences)",
+  "spokenResponse": "Concise natural string to speak aloud to user",
   "hazard": null | {
     "type": "dropoff" | "stairs_down" | "tripping" | "low_overhang" | "hot_surface" | "obstacle",
     "severity": "caution" | "critical",
-    "description": "Short hazard description",
+    "description": "Short description of the hazard",
     "clockPosition": "12 o'clock"
   },
   "detectedObjects": [
     {
       "label": "Name of object",
       "confidence": 0.95,
-      "box2d": [ymin, xmin, ymax, xmax], // integers 0 to 1000
+      "box2d": [ymin, xmin, ymax, xmax],
       "clockPosition": "1 o'clock",
       "relativeDistance": "arm_reach" | "near" | "mid" | "far",
       "attributes": ["color", "state"],
       "isTargetGoal": false
     }
   ],
-  "sceneDescription": "Immediate layout of room and whether walkway is clear",
+  "sceneDescription": "Overview of room layout and whether path ahead is clear",
   "pathIsClear": true,
-  "activePerceptionRequest": null | "Instruction for user to re-aim camera (e.g. Please tilt down)",
+  "activePerceptionRequest": null | "Specific re-aiming directive (e.g. Please tilt down slightly)",
   "foundTarget": false,
   "spatialRelations": [
     { "subject": "mug", "relation": "on", "object": "table" }
@@ -151,7 +165,13 @@ You MUST respond with valid JSON matching this structure:
     "label": "Short landmark name",
     "note": "Detailed spatial description",
     "room": "Room name"
-  }
+  },
+  "goalUpdate": null | {
+    "targetObject": "bottle",
+    "state": "active" | "need_observation" | "verifying" | "completed" | "cancelled",
+    "nextAction": "Step forward two steps"
+  },
+  "suggestedAction": "Next safe step"
 }
 `;
 
@@ -162,15 +182,55 @@ function getIntelligentFallback(
   sensors: string,
   memory: any[] = []
 ) {
+  const cleanQ = (query || '').toLowerCase().trim();
   const target = goal || query.replace(/find|where is|locate|search for/i, '').trim() || 'item';
   const hasTargetInMemory = memory.find((m) =>
     m.label.toLowerCase().includes(target.toLowerCase())
   );
 
-  if (mode === 'find') {
+  // 1. Follow-up: "Can you see it now?"
+  if (/\b(can you see it now|see it now|is it visible|did you find it|how about now)\b/i.test(cleanQ)) {
+    const searchTarget = goal || 'target object';
+    return {
+      spokenResponse: `I do not see your ${searchTarget} in this new view yet. Please tilt the camera slightly lower towards the table surface.`,
+      detectedObjects: [],
+      hazard: null,
+      pathIsClear: true,
+      sceneDescription: `Scanning new camera observation for ${searchTarget}. Not yet verified.`,
+      activePerceptionRequest: 'Please tilt slightly lower towards the table surface.',
+      foundTarget: false,
+      spatialRelations: [],
+      goalUpdate: {
+        targetObject: searchTarget,
+        state: 'need_observation',
+        nextAction: 'Tilt camera slightly lower',
+      },
+    };
+  }
+
+  // 2. Follow-up: "What should I do next?"
+  if (/\b(what should i do next|what next|how should i proceed|where do i go next)\b/i.test(cleanQ)) {
+    const nextMsg = goal
+      ? `To reach your ${goal}, take two steps towards the table and slowly pan left and right.`
+      : `The walkway directly ahead at 12 o'clock is clear. Take small steps forward.`;
+    return {
+      spokenResponse: nextMsg,
+      detectedObjects: [],
+      hazard: null,
+      pathIsClear: true,
+      sceneDescription: 'Walkway ahead inspected and clear of obstacles.',
+      activePerceptionRequest: null,
+      foundTarget: false,
+      spatialRelations: [],
+      suggestedAction: nextMsg,
+    };
+  }
+
+  // 3. Object finding / Location query
+  if (mode === 'find' || /\b(where is|find|locate|look for)\b/i.test(cleanQ)) {
     if (hasTargetInMemory) {
       return {
-        spokenResponse: `I previously recorded your ${hasTargetInMemory.label} at heading ${hasTargetInMemory.heading ? Math.round(hasTargetInMemory.heading) + ' degrees' : 'earlier'}: ${hasTargetInMemory.note}. Turn camera towards that spot to confirm.`,
+        spokenResponse: `I last saw your ${hasTargetInMemory.label} on the ${hasTargetInMemory.room || 'study table'}. Please point the camera toward the table so I can check.`,
         detectedObjects: [
           {
             id: 'mem-obj-1',
@@ -186,9 +246,14 @@ function getIntelligentFallback(
         hazard: null,
         pathIsClear: true,
         sceneDescription: 'Target remembered in historical memory. Live confirmation pending.',
-        activePerceptionRequest: 'Please pan camera toward your saved location to verify.',
+        activePerceptionRequest: `Please point camera toward the ${hasTargetInMemory.room || 'study table'}.`,
         foundTarget: false,
-        spatialRelations: [{ subject: target, relation: 'near', object: 'saved landmark' }],
+        spatialRelations: [{ subject: target, relation: 'on', object: hasTargetInMemory.room || 'study table' }],
+        goalUpdate: {
+          targetObject: hasTargetInMemory.label,
+          state: 'need_observation',
+          nextAction: 'Point camera toward table',
+        },
       };
     }
 
@@ -201,6 +266,11 @@ function getIntelligentFallback(
       activePerceptionRequest: 'Tilt camera slightly down and pan right.',
       foundTarget: false,
       spatialRelations: [],
+      goalUpdate: {
+        targetObject: target,
+        state: 'active',
+        nextAction: 'Pan slowly to your right',
+      },
     };
   }
 
@@ -259,7 +329,7 @@ function getIntelligentFallback(
     };
   }
 
-  // Default describe / ask
+  // Default describe / conversational ask
   return {
     spokenResponse: `Path straight ahead is clear for several steps. A surface is on your left at 10 o'clock, and an open walkway is ahead at 12 o'clock.`,
     detectedObjects: [
@@ -351,31 +421,6 @@ app.post('/api/device/telemetry', (req, res) => {
       });
     }
 
-    // Persist to telemetry_logs table in database
-    try {
-      db.prepare(`
-        INSERT INTO telemetry_logs (
-          device_id, battery_level, battery_charging, forward_tof_cm,
-          downward_cliff_mm, imu_json, head_pitch, earphone_connected,
-          audio_volume, timestamp
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        wearableState.deviceId || 'ESP32-S3-SENTRA-001',
-        wearableState.batteryLevel,
-        wearableState.batteryCharging ? 1 : 0,
-        wearableState.forwardToFDistanceCm,
-        wearableState.downwardCliffSensorMm,
-        JSON.stringify(wearableState.imu || {}),
-        wearableState.headPitchAngle || 0,
-        wearableState.earphoneConnected ? 1 : 0,
-        wearableState.audioVolume || 80,
-        Date.now()
-      );
-    } catch (dbErr) {
-      // Non-blocking telemetry log
-      console.warn('[DB] Failed to log telemetry:', dbErr);
-    }
-
     res.json({
       ok: true,
       received: true,
@@ -436,103 +481,6 @@ app.post('/api/device/simulate', (req, res) => {
     res.json({ ok: true, telemetry: wearableState });
   } catch (err: any) {
     res.status(400).json({ ok: false, error: err.message });
-  }
-});
-
-// Real-Time Streaming AI Conversation (Feature 2: Gemini Live / Streaming API)
-app.post('/api/sentra/chat/stream', async (req, res) => {
-  const {
-    query = '',
-    image = null,
-    mode = 'ask',
-    goal = null,
-    memory = [],
-    history = [],
-    heading = null,
-    sensors = '',
-    useWearableFrame = false,
-  } = req.body;
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-
-  const ai = getGeminiClient();
-  if (!ai) {
-    const fallback = getIntelligentFallback(mode, query, goal, sensors, memory);
-    res.write(`data: ${JSON.stringify({ chunk: fallback.spokenResponse, isComplete: true, fullText: fallback.spokenResponse, fallbackData: fallback })}\n\n`);
-    res.end();
-    return;
-  }
-
-  try {
-    const frameToAnalyze = useWearableFrame && wearableState.latestFrame ? wearableState.latestFrame : image;
-    const parts: Array<{ text?: string; inlineData?: { mimeType: string; data: string } }> = [];
-
-    if (frameToAnalyze && typeof frameToAnalyze === 'string') {
-      const match = frameToAnalyze.match(/^data:([^;]+);base64,(.+)$/);
-      if (match) {
-        parts.push({
-          inlineData: {
-            mimeType: match[1] || 'image/jpeg',
-            data: match[2],
-          },
-        });
-      }
-    }
-
-    let promptContext = `You are SENTRA, a voice-first assistive AI companion for visually impaired individuals.
-You excel at:
-1. SPATIAL MEMORY: Recalling previously observed objects, where they were left, landmarks, and spatial layout with honest verification ("I remember leaving your keys on the study desk, but looking forward now I see...").
-2. GOAL-ORIENTED ASSISTANCE: Continuously guiding the user to locate objects or destinations step-by-step with clock directions and active perception directives ("Turn 45 degrees left", "Tilt camera slightly down").
-
-Strict Spoken Rules:
-1. Answer directly and concisely in 1 to 2 clear spoken sentences. No fluff, no markdown.
-2. State spatial locations using clock positions ("at 1 o'clock", "straight ahead at 12 o'clock") and human distance ("two steps ahead", "at arm's reach").
-3. Actively help achieve the user's active goal or memory question immediately.
-`;
-
-    if (goal) promptContext += `ACTIVE USER GOAL: "${goal}"\n`;
-    if (query) promptContext += `USER SPOKEN QUERY: "${query}"\n`;
-    if (heading != null) promptContext += `COMPASS HEADING: ${Math.round(heading)}°\n`;
-    if (wearableState.connected) {
-      promptContext += `WEARABLE SENSORS: Forward ToF ${wearableState.forwardToFDistanceCm}cm, Cliff ${wearableState.downwardCliffSensorMm}mm\n`;
-    }
-    if (memory && memory.length > 0) {
-      promptContext += `SPATIAL MEMORIES IN DATABASE (${memory.length} items):\n${memory.slice(-8).map((m: any) => `* [${m.source || 'historical'}] "${m.label}": ${m.note} (Room: ${m.room || 'General Space'}, Heading: ${m.heading != null ? m.heading + '°' : 'unknown'})`).join('\n')}\n`;
-    }
-    if (history && history.length > 0) {
-      promptContext += `RECENT DIALOGUE:\n${history.slice(-4).map((h: any) => `${h.role === 'user' ? 'User' : 'SENTRA'}: ${h.text}`).join('\n')}\n`;
-    }
-    if (!frameToAnalyze) {
-      promptContext += `NOTE: Camera frame is currently unavailable. Answer based on memory or prompt user to start camera.\n`;
-    }
-
-    parts.push({ text: promptContext });
-
-    const responseStream = await ai.models.generateContentStream({
-      model: 'gemini-3.5-flash-lite',
-      contents: parts,
-      config: {
-        maxOutputTokens: 200,
-        temperature: 0.4,
-      },
-    });
-
-    let fullText = '';
-    for await (const chunk of responseStream) {
-      const text = chunk.text || '';
-      fullText += text;
-      res.write(`data: ${JSON.stringify({ chunk: text, isComplete: false, fullText })}\n\n`);
-    }
-
-    res.write(`data: ${JSON.stringify({ chunk: '', isComplete: true, fullText })}\n\n`);
-    res.end();
-  } catch (err: any) {
-    console.error('Streaming conversation error:', err);
-    const fallback = getIntelligentFallback(mode, query, goal, sensors, memory);
-    res.write(`data: ${JSON.stringify({ chunk: fallback.spokenResponse, isComplete: true, fullText: fallback.spokenResponse, fallbackData: fallback })}\n\n`);
-    res.end();
   }
 });
 
@@ -607,9 +555,9 @@ app.post('/api/sentra/analyze', async (req, res) => {
     }
 
     if (memory && Array.isArray(memory) && memory.length > 0) {
-      promptContext += `SPATIAL & CONTEXTUAL MEMORIES IN DATABASE (${memory.length} items):\n`;
-      memory.slice(-10).forEach((m) => {
-        promptContext += `- [${m.source || 'historical'}] "${m.label}": ${m.note} (Room: ${m.room || 'General Space'}, Heading: ${m.heading != null ? Math.round(m.heading) + '°' : 'unknown'})\n`;
+      promptContext += `SAVED CONTEXTUAL MEMORIES (${memory.length} items):\n`;
+      memory.slice(-5).forEach((m) => {
+        promptContext += `- [${m.source || 'historical'}] ${m.label}: ${m.note} (Heading: ${m.heading != null ? Math.round(m.heading) + '°' : 'unknown'})\n`;
       });
     }
 
@@ -624,11 +572,11 @@ app.post('/api/sentra/analyze', async (req, res) => {
       promptContext += `NOTE: NO CAMERA FRAME AVAILABLE. The camera is inactive or not transmitting. Do not claim to see the environment.\n`;
     }
 
-    promptContext += `\nRespond strictly with JSON containing: spokenResponse, hazard, detectedObjects, sceneDescription, pathIsClear, activePerceptionRequest, foundTarget, spatialRelations, rememberedData.\n`;
+    promptContext += `\nRespond strictly with JSON containing: spokenResponse, hazard, detectedObjects, sceneDescription, pathIsClear, activePerceptionRequest, foundTarget, spatialRelations, rememberedData, goalUpdate, suggestedAction.\n`;
 
     parts.push({ text: promptContext });
 
-    const modelsToTry = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+    const modelsToTry = ['gemini-3.8-flash', 'gemini-3.1-flash-lite'];
     let parsedData: any = null;
     let rawText = '';
     let isQuotaExhausted = false;
@@ -721,6 +669,8 @@ app.post('/api/sentra/analyze', async (req, res) => {
       sceneDescription: parsedData.sceneDescription || '',
       pathIsClear: parsedData.pathIsClear !== undefined ? parsedData.pathIsClear : true,
       rememberedData: parsedData.rememberedData || null,
+      goalUpdate: parsedData.goalUpdate || null,
+      suggestedAction: parsedData.suggestedAction || null,
       quotaExhausted: isQuotaExhausted,
       timestamp: Date.now(),
     });

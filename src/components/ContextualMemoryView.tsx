@@ -1,19 +1,5 @@
 import React, { useState } from 'react';
-import {
-  Bookmark,
-  Search,
-  Trash2,
-  Volume2,
-  Navigation,
-  Compass,
-  Plus,
-  Clock,
-  CheckCircle2,
-  History,
-  Download,
-  Upload,
-  Database,
-} from 'lucide-react';
+import { Bookmark, Search, Trash2, Volume2, Navigation, Compass, Plus, Tag, Clock, CheckCircle2, History, AlertCircle } from 'lucide-react';
 import { SentraMemoryItem } from '../types/sentra';
 import { getCompassDirection } from '../utils/sensors';
 
@@ -24,8 +10,6 @@ interface ContextualMemoryViewProps {
   onClearAll: () => void;
   onSpeakMemory: (item: SentraMemoryItem) => void;
   onFindMemoryTarget: (label: string) => void;
-  onExportData?: () => void;
-  onImportData?: (file: File) => void;
 }
 
 export const ContextualMemoryView: React.FC<ContextualMemoryViewProps> = ({
@@ -35,15 +19,12 @@ export const ContextualMemoryView: React.FC<ContextualMemoryViewProps> = ({
   onClearAll,
   onSpeakMemory,
   onFindMemoryTarget,
-  onExportData,
-  onImportData,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddForm, setShowAddForm] = useState(false);
   const [newLabel, setNewLabel] = useState('');
   const [newNote, setNewNote] = useState('');
   const [newRoom, setNewRoom] = useState('Living Room');
-  const [activeTab, setActiveTab] = useState<'all' | 'verified' | 'historical'>('all');
 
   const handleAddSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -55,73 +36,36 @@ export const ContextualMemoryView: React.FC<ContextualMemoryViewProps> = ({
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && onImportData) {
-      onImportData(file);
-    }
-  };
-
-  const filtered = memories.filter((m) => {
-    const matchSearch =
+  const filtered = memories.filter(
+    (m) =>
       m.label.toLowerCase().includes(searchTerm.toLowerCase()) ||
       m.note.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      (m.room && m.room.toLowerCase().includes(searchTerm.toLowerCase()));
-
-    if (!matchSearch) return false;
-    if (activeTab === 'verified') return m.source === 'live_verified';
-    if (activeTab === 'historical') return m.source !== 'live_verified';
-    return true;
-  });
+      (m.room && m.room.toLowerCase().includes(searchTerm.toLowerCase()))
+  );
 
   return (
     <div className="space-y-4 text-foreground animate-fade-in">
-      {/* Header & Controls */}
+      {/* Header & Search */}
       <div className="rounded-2xl bg-card border border-border p-4 shadow-sm space-y-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 font-bold text-lg text-primary">
             <Bookmark className="h-5 w-5" />
-            <span>Contextual Memory ({memories.length})</span>
+            <span>Contextual Object & Place Memory ({memories.length})</span>
           </div>
-
-          <div className="flex items-center gap-1.5">
-            {onExportData && (
-              <button
-                onClick={onExportData}
-                title="Export JSON Backup"
-                className="p-1.5 rounded-lg bg-secondary text-foreground hover:bg-secondary/80 text-xs font-bold transition-all"
-              >
-                <Download className="h-4 w-4" />
-              </button>
-            )}
-
-            {onImportData && (
-              <label
-                title="Import JSON Backup"
-                className="p-1.5 rounded-lg bg-secondary text-foreground hover:bg-secondary/80 text-xs font-bold cursor-pointer transition-all"
-              >
-                <Upload className="h-4 w-4" />
-                <input type="file" accept=".json" className="hidden" onChange={handleFileChange} />
-              </label>
-            )}
-
-            <button
-              onClick={() => setShowAddForm(!showAddForm)}
-              className="rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:brightness-110 active:scale-95 transition-all flex items-center gap-1"
-            >
-              <Plus className="h-4 w-4" />
-              <span>{showAddForm ? 'Cancel' : 'Remember New'}</span>
-            </button>
-          </div>
+          <button
+            onClick={() => setShowAddForm(!showAddForm)}
+            className="rounded-xl bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:brightness-110 active:scale-95 transition-all flex items-center gap-1"
+          >
+            <Plus className="h-4 w-4" />
+            <span>{showAddForm ? 'Cancel' : 'Remember New'}</span>
+          </button>
         </div>
 
-        {/* Persistence Status */}
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Database className="h-3.5 w-3.5 text-primary" />
-          <span>IndexedDB Structured Storage: Active & Persistent across sessions.</span>
-        </div>
+        <p className="text-xs text-muted-foreground">
+          SENTRA maintains consent-based spatial memories. Items are clearly tagged as either verified live observations or historical memory so you are never misled.
+        </p>
 
-        {/* Add Memory Form */}
+        {/* Add Memory Modal/Form */}
         {showAddForm && (
           <form onSubmit={handleAddSubmit} className="space-y-2.5 pt-2 border-t border-border/40">
             <input
@@ -155,7 +99,7 @@ export const ContextualMemoryView: React.FC<ContextualMemoryViewProps> = ({
                 type="submit"
                 className="flex-1 rounded-xl bg-primary py-2 text-xs font-bold text-primary-foreground"
               >
-                Save to IndexedDB
+                Save Memory
               </button>
             </div>
           </form>
@@ -166,128 +110,118 @@ export const ContextualMemoryView: React.FC<ContextualMemoryViewProps> = ({
           <Search className="absolute left-3 top-2.5 h-4 w-4 text-muted-foreground" />
           <input
             type="text"
-            placeholder="Search saved memories (e.g. bottle, desk, glasses)..."
+            placeholder="Search saved objects, rooms, or notes..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="w-full rounded-xl bg-secondary pl-9 pr-4 py-2 text-xs text-foreground placeholder:text-muted-foreground border border-border/60 focus:border-primary focus:outline-none"
+            className="w-full rounded-xl bg-secondary pl-9 pr-4 py-2 text-sm border border-border/50 focus:border-primary focus:outline-none placeholder:text-muted-foreground"
           />
-        </div>
-
-        {/* Filter Tabs */}
-        <div className="flex gap-1.5 pt-1">
-          <button
-            onClick={() => setActiveTab('all')}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'all'
-                ? 'bg-primary text-primary-foreground'
-                : 'bg-secondary text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            All ({memories.length})
-          </button>
-          <button
-            onClick={() => setActiveTab('verified')}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'verified'
-                ? 'bg-emerald-500 text-white'
-                : 'bg-secondary text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            Live Verified ({memories.filter((m) => m.source === 'live_verified').length})
-          </button>
-          <button
-            onClick={() => setActiveTab('historical')}
-            className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
-              activeTab === 'historical'
-                ? 'bg-amber-500 text-white'
-                : 'bg-secondary text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            Historical ({memories.filter((m) => m.source !== 'live_verified').length})
-          </button>
         </div>
       </div>
 
-      {/* Memory Items List */}
-      <div className="space-y-2">
+      {/* Memory List */}
+      <div className="space-y-2.5">
         {filtered.length === 0 ? (
-          <div className="rounded-2xl bg-card border border-border p-8 text-center text-muted-foreground text-xs">
-            No memories match your query.
+          <div className="rounded-2xl bg-card border border-border p-8 text-center text-muted-foreground space-y-2">
+            <Bookmark className="mx-auto h-8 w-8 opacity-40" />
+            <p className="text-base font-bold text-foreground">No memories found</p>
+            <p className="text-xs">
+              Say <span className="text-primary font-bold">"Remember where I placed this"</span> or click Remember New above.
+            </p>
           </div>
         ) : (
-          filtered.map((item) => (
-            <div
-              key={item.id}
-              className="p-3.5 rounded-2xl bg-card border border-border space-y-2 shadow-sm"
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-sm text-foreground">{item.label}</span>
-                  {item.source === 'live_verified' ? (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-bold text-emerald-400">
-                      <CheckCircle2 className="h-3 w-3" />
-                      Live Verified
+          filtered
+            .slice()
+            .reverse()
+            .map((item) => {
+              const isLive = item.source === 'live_verified';
+
+              return (
+                <div
+                  key={item.id}
+                  className="rounded-2xl bg-card border border-border/60 p-4 space-y-2 hover:border-primary/50 transition-colors shadow-sm"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <h4 className="font-bold text-lg text-foreground">{item.label}</h4>
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold ${
+                            isLive
+                              ? 'bg-success/20 text-success border border-success/40'
+                              : 'bg-accent/20 text-accent border border-accent/40'
+                          }`}
+                        >
+                          {isLive ? <CheckCircle2 className="h-3 w-3" /> : <History className="h-3 w-3" />}
+                          <span>{isLive ? 'Live Verified' : 'Historical Memory'}</span>
+                        </span>
+                      </div>
+
+                      {item.room && (
+                        <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                          <Tag className="h-3 w-3 text-primary" />
+                          <span>{item.room}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Actions */}
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={() => onSpeakMemory(item)}
+                        className="rounded-lg p-2 text-primary hover:bg-secondary transition-colors"
+                        aria-label={`Read out note for ${item.label}`}
+                        title="Read aloud"
+                      >
+                        <Volume2 className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => onFindMemoryTarget(item.label)}
+                        className="rounded-lg p-2 text-accent hover:bg-secondary transition-colors"
+                        aria-label={`Start finding ${item.label}`}
+                        title="Guide me towards this"
+                      >
+                        <Navigation className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => onDeleteMemory(item.id)}
+                        className="rounded-lg p-2 text-destructive hover:bg-secondary transition-colors"
+                        aria-label={`Delete ${item.label}`}
+                        title="Delete"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-sm text-foreground/90 leading-relaxed">{item.note}</p>
+
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1 border-t border-border/20">
+                    <span className="flex items-center gap-1">
+                      <Clock className="h-3 w-3" />
+                      {item.at}
                     </span>
-                  ) : (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 text-[10px] font-bold text-amber-400">
-                      <History className="h-3 w-3" />
-                      Historical Recall
-                    </span>
-                  )}
+                    {item.heading != null && (
+                      <span className="flex items-center gap-1 font-mono text-primary">
+                        <Compass className="h-3 w-3" />
+                        {Math.round(item.heading)}° {getCompassDirection(item.heading)}
+                      </span>
+                    )}
+                  </div>
                 </div>
-
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => onSpeakMemory(item)}
-                    className="p-1 rounded-lg hover:bg-secondary text-muted-foreground hover:text-foreground"
-                    title="Speak aloud"
-                  >
-                    <Volume2 className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => onFindMemoryTarget(item.label)}
-                    className="p-1 rounded-lg hover:bg-secondary text-primary"
-                    title="Search for this object"
-                  >
-                    <Navigation className="h-4 w-4" />
-                  </button>
-                  <button
-                    onClick={() => onDeleteMemory(item.id)}
-                    className="p-1 rounded-lg hover:bg-destructive/15 text-destructive"
-                    title="Delete memory"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </div>
-
-              <p className="text-xs text-foreground/90 leading-relaxed">{item.note}</p>
-
-              <div className="flex items-center gap-3 text-[10px] text-muted-foreground font-mono pt-1 border-t border-border/30">
-                <span className="flex items-center gap-1">
-                  <Clock className="h-3 w-3" />
-                  <span>{item.at}</span>
-                </span>
-                {item.heading != null && (
-                  <span className="flex items-center gap-1">
-                    <Compass className="h-3 w-3 text-primary" />
-                    <span>
-                      {Math.round(item.heading)}° {getCompassDirection(item.heading)}
-                    </span>
-                  </span>
-                )}
-                {item.room && <span>Room: {item.room}</span>}
-              </div>
-            </div>
-          ))
+              );
+            })
         )}
       </div>
 
       {memories.length > 0 && (
-        <div className="text-center pt-1">
+        <div className="pt-2 flex justify-end">
           <button
-            onClick={onClearAll}
-            className="text-xs text-muted-foreground hover:text-destructive underline font-semibold transition-colors"
+            onClick={() => {
+              if (window.confirm('Delete all contextual memories?')) {
+                onClearAll();
+              }
+            }}
+            className="text-xs font-bold text-destructive hover:underline"
           >
             Clear all saved memories
           </button>

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { GoalTask, DetectedObject, VerificationStep, VerificationStepOutcome } from '../types/sentra';
 import { getCompassDirection } from '../utils/sensors';
+import { VerificationHistory } from './VerificationHistory';
 
 interface ObjectFinderViewProps {
   currentGoal: GoalTask | null;
@@ -226,120 +227,66 @@ export const ObjectFinderView: React.FC<ObjectFinderViewProps> = ({
           </div>
 
           {/* VISUAL HISTORY LOG OF VERIFICATION ATTEMPTS */}
-          <div className="pt-2 border-t border-border/40 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 font-bold text-sm text-foreground">
-                <History className="h-4 w-4 text-accent" />
-                <span>Verification Attempt History ({verificationSteps.length})</span>
-              </div>
-              <span className="text-[11px] text-muted-foreground">
-                {currentGoal.state === 'completed' ? (
-                  <span className="text-emerald-400 font-bold flex items-center gap-1">
-                    <ShieldCheck className="h-3.5 w-3.5" />
-                    Verified Found
-                  </span>
-                ) : (
-                  <span className="text-primary font-semibold flex items-center gap-1">
-                    <RefreshCw className="h-3 w-3 animate-spin" />
-                    Searching Live
-                  </span>
-                )}
-              </span>
-            </div>
-
-            {verificationSteps.length === 0 ? (
-              <div className="rounded-xl bg-secondary/60 p-3 text-center text-xs text-muted-foreground">
-                Verification steps will be logged here as SENTRA scans your surroundings.
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-                {verificationSteps
-                  .slice()
-                  .reverse()
-                  .map((step, revIdx) => {
-                    const stepNumber = verificationSteps.length - revIdx;
-                    const outcome = getOutcomeBadge(step.outcome);
-                    const elapsedSec = Math.round(
-                      (step.timestamp - currentGoal.createdAt) / 1000
-                    );
-
-                    return (
-                      <div
-                        key={step.id || `step-${stepNumber}`}
-                        className={`rounded-xl p-3 border text-xs space-y-1.5 transition-all ${
-                          step.outcome === 'success'
-                            ? 'bg-emerald-950/30 border-emerald-500/50 shadow-sm'
-                            : 'bg-secondary/70 border-border/50'
-                        }`}
-                      >
-                        {/* Step Header */}
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-background font-mono text-[10px] font-bold text-primary border border-border">
-                              #{stepNumber}
-                            </span>
-                            <span className="font-bold text-sm text-foreground">
-                              {step.stepName}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2 shrink-0">
-                            <span
-                              className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-bold border ${outcome.classes}`}
-                            >
-                              {outcome.icon}
-                              <span>{outcome.label}</span>
-                            </span>
-                            <span className="text-[10px] font-mono text-muted-foreground">
-                              +{elapsedSec}s
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* Step Description / Spoken Guidance Note */}
-                        <p className="text-xs text-foreground/90 leading-relaxed pl-7">
-                          {step.note}
-                        </p>
-
-                        {/* Step Badges (Compass Heading, Clock Position, Confidence) */}
-                        <div className="flex flex-wrap items-center gap-2 pl-7 pt-0.5 text-[10px] text-muted-foreground">
-                          {step.heading != null && (
-                            <span className="inline-flex items-center gap-1 rounded bg-background/80 px-1.5 py-0.5 border border-border/40 font-mono">
-                              <Compass className="h-3 w-3 text-primary" />
-                              <span>
-                                {Math.round(step.heading)}° {getCompassDirection(step.heading)}
-                              </span>
-                            </span>
-                          )}
-
-                          {step.clockPosition && (
-                            <span className="inline-flex items-center gap-1 rounded bg-background/80 px-1.5 py-0.5 border border-border/40 font-mono">
-                              <Clock className="h-3 w-3 text-accent" />
-                              <span>{step.clockPosition}</span>
-                            </span>
-                          )}
-
-                          {step.confidence != null && (
-                            <span className="inline-flex items-center gap-1 rounded bg-background/80 px-1.5 py-0.5 border border-border/40 font-mono text-emerald-400 font-bold">
-                              <span>Confidence: {Math.round(step.confidence * 100)}%</span>
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
+          <div className="pt-2 border-t border-border/40">
+            <VerificationHistory
+              currentGoal={currentGoal}
+              activePerceptionPrompt={activePerceptionPrompt}
+              isSearching={isSearching}
+            />
           </div>
         </div>
       ) : (
-        <div className="rounded-2xl bg-card border border-border p-6 text-center text-muted-foreground space-y-2">
-          <Sparkles className="mx-auto h-8 w-8 text-primary opacity-50" />
-          <p className="text-lg font-bold text-foreground">No Search Task In Progress</p>
-          <p className="text-sm">
-            Say <span className="text-primary font-bold">"Where is my spectacles?"</span> or pick an
-            item above to begin active search guidance with live verification logs.
-          </p>
+        <div className="space-y-4">
+          <div className="rounded-2xl bg-card border border-border p-6 text-center text-muted-foreground space-y-2">
+            <Sparkles className="mx-auto h-8 w-8 text-primary opacity-50" />
+            <p className="text-lg font-bold text-foreground">No Search Task In Progress</p>
+            <p className="text-sm max-w-md mx-auto">
+              Say <span className="text-primary font-bold">"Where is my spectacles?"</span> or pick an
+              item above to initiate active search guidance with live verification logs.
+            </p>
+          </div>
+
+          {/* Educational / Standby Verification Architecture Card */}
+          <div className="rounded-2xl bg-card border border-border/70 p-4 space-y-3">
+            <div className="flex items-center gap-2 font-bold text-sm text-foreground">
+              <History className="h-4 w-4 text-primary" />
+              <span>Closed-Loop Verification Architecture</span>
+            </div>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              SENTRA does not hallucinate item locations. Each target passes through continuous verification states:
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-xs">
+              <div className="rounded-xl border border-emerald-500/40 bg-emerald-950/20 p-2.5 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-emerald-400">
+                  <CheckCircle2 className="h-4 w-4 shrink-0" />
+                  <span>Completed</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Target verified in camera frame with high confidence & spatial clock position.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-primary/40 bg-primary/10 p-2.5 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-primary">
+                  <span className="h-2 w-2 rounded-full bg-primary animate-pulse" />
+                  <span>Active</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Live sensor sweep, re-aiming prompt, or waiting for camera angle adjustment.
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-sky-500/40 bg-secondary/50 p-2.5 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-sky-400">
+                  <Eye className="h-4 w-4 shrink-0" />
+                  <span>Attempted</span>
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Scanned orientation angle where target was not detected or was obscured.
+                </p>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

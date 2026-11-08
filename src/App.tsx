@@ -24,32 +24,10 @@ import {
   SpatialRelationship,
   VerificationStep,
   WearableTelemetry,
-  TrackedObject,
-  SlamState,
-  NavigationRoute,
-  NavigationNode,
-  LocalVisionAnalysis,
-  WakeWordState,
-  PerceptionMode,
 } from './types/sentra';
 import { parseVoiceIntent } from './utils/parser';
-import {
-  isSpeaking,
-  playChime,
-  registerSpeechListener,
-  speakText,
-  stopSpeaking,
-} from './utils/audio';
+import { isSpeaking, playChime, speakText, stopSpeaking } from './utils/audio';
 import { analyzeLocalScene } from './utils/localVision';
-import { memoryService } from './services/indexedDbMemoryService';
-import { wakeWordService } from './services/wakeWordService';
-import { temporalTracker } from './services/temporalTrackerService';
-import { visualSlamService } from './services/visualSlamService';
-import { indoorNavigation } from './services/indoorNavigationService';
-import { offlineVision } from './services/offlineVisionService';
-import { streamingConversation } from './services/streamingConversationService';
-import { authService, AuthState } from './services/authService';
-import { AuthModal } from './components/AuthModal';
 import {
   Mic,
   Eye,
@@ -66,9 +44,6 @@ import {
   Radio,
   CheckCircle2,
   AlertTriangle,
-  Zap,
-  User,
-  Database,
 } from 'lucide-react';
 
 const STATS_STORAGE_KEY = 'sentra.stats.v1';
@@ -83,8 +58,6 @@ const DEFAULT_STATS: SentraStats = {
   findsDone: 0,
   findMs: 0,
   retakes: 0,
-  trackingUpdates: 0,
-  offlineScans: 0,
 };
 
 const DEFAULT_SETTINGS: SentraSettings = {
@@ -93,11 +66,8 @@ const DEFAULT_SETTINGS: SentraSettings = {
   hapticFeedback: true,
   cameraFacing: 'environment',
   autoContinuousFind: true,
-  wakeWordEnabled: true, // "Hey SENTRA" enabled by default
+  wakeWordEnabled: false,
   selectedInputSource: 'browser_camera',
-  streamingVoiceEnabled: true,
-  wakeWordSensitivity: 0.7,
-  preferredPerceptionMode: 'hybrid',
 };
 
 const DEFAULT_TELEMETRY: WearableTelemetry = {
@@ -139,7 +109,6 @@ export default function App() {
 
   // Perception & World Model State
   const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
-  const [trackedObjects, setTrackedObjects] = useState<TrackedObject[]>([]);
   const [activeHazard, setActiveHazard] = useState<HazardAlert | null>(null);
   const [activePerceptionPrompt, setActivePerceptionPrompt] = useState<string | null>(null);
   const [sceneDescription, setSceneDescription] = useState<string>(
@@ -151,19 +120,7 @@ export default function App() {
   const [currentGoal, setCurrentGoal] = useState<GoalTask | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
 
-  // Feature 5: Real Visual-Inertial SLAM State
-  const [slamState, setSlamState] = useState<SlamState>(() => visualSlamService.getState());
-
-  // Feature 6: Topological Route & Navigation State
-  const [activeRoute, setActiveRoute] = useState<NavigationRoute | null>(null);
-
-  // Feature 7: Offline Local Vision Analysis State
-  const [localAnalysis, setLocalAnalysis] = useState<LocalVisionAnalysis | null>(null);
-
-  // Feature 1: Wake-Word Detection State
-  const [wakeWordState, setWakeWordState] = useState<WakeWordState>('idle');
-
-  // Spatial World Model Landmarks & Relationships
+  // Spatial World Model
   const [landmarks, setLandmarks] = useState<SpatialLandmark[]>([
     {
       id: 'lm-1',
@@ -198,40 +155,7 @@ export default function App() {
   const [typedQuery, setTypedQuery] = useState('');
   const [showTextInput, setShowTextInput] = useState(false);
 
-  // Authentication & Database Sync State
-  const [authState, setAuthState] = useState<AuthState>(() => authService.getState());
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-
-  useEffect(() => {
-    const unsub = authService.subscribe((state) => {
-      setAuthState(state);
-      if (state.isAuthenticated) {
-        // Load settings and memories from database
-        authService.loadUserSettings().then((dbSettings) => {
-          if (dbSettings) {
-            setSettings((prev) => ({ ...prev, ...dbSettings }));
-          }
-        });
-        authService.fetchMemoriesFromDatabase().then((dbMems) => {
-          if (dbMems && dbMems.length > 0) {
-            setMemories(dbMems.map((m) => ({
-              id: m.id,
-              label: m.title,
-              note: m.details,
-              at: new Date(m.createdAt).toLocaleDateString(),
-              timestamp: m.createdAt,
-              heading: m.metadata?.heading ?? 0,
-              room: m.metadata?.room ?? 'Unknown',
-              source: m.metadata?.source ?? 'remembered_historical',
-            })));
-          }
-        });
-      }
-    });
-    return unsub;
-  }, []);
-
-  // Feature 4: Contextual Memory with IndexedDB persistence
+  // Persistence
   const [memories, setMemories] = useState<SentraMemoryItem[]>(() => {
     try {
       const stored = localStorage.getItem(MEMORY_STORAGE_KEY);
@@ -276,51 +200,12 @@ export default function App() {
   const historyRef = useRef<Array<{ role: 'user' | 'assistant'; text: string }>>([]);
   const recognitionRef = useRef<any>(null);
 
-  // Load IndexedDB memories on initial mount
-  useEffect(() => {
-    let isMounted = true;
-    memoryService
-      .getAllObjectMemories()
-      .then((stored) => {
-        if (isMounted && stored && stored.length > 0) {
-          setMemories(stored);
-        }
-      })
-      .catch((err) => {
-        console.warn('Could not read from IndexedDB, using local state:', err);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
   // Helpers for persistence
   const updateMemories = (newMemories: SentraMemoryItem[]) => {
     setMemories(newMemories);
     try {
       localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(newMemories));
     } catch {}
-    const latest = newMemories[newMemories.length - 1];
-    if (latest) {
-      memoryService.saveObjectMemory(latest).catch(() => {});
-    }
-    // Also sync to backend SQLite database if user is logged in
-    if (authService.getState().isAuthenticated) {
-      authService.syncMemoriesToDatabase(newMemories.map((m) => ({
-        id: m.id,
-        type: 'object',
-        title: m.label,
-        details: m.note,
-        tags: [m.room, m.source],
-        metadata: {
-          heading: m.heading,
-          room: m.room,
-          source: m.source,
-        },
-        createdAt: m.timestamp,
-        updatedAt: Date.now(),
-      }))).catch(() => {});
-    }
   };
 
   const updateStats = (updater: (prev: SentraStats) => SentraStats) => {
@@ -338,134 +223,7 @@ export default function App() {
     try {
       localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(newSettings));
     } catch {}
-    // Also sync settings to backend SQLite database if user is logged in
-    if (authService.getState().isAuthenticated) {
-      authService.saveUserSettings(newSettings).catch(() => {});
-    }
   };
-
-  // Sync speech status with WakeWordService
-  useEffect(() => {
-    const unregister = registerSpeechListener((speaking) => {
-      if (speaking) {
-        wakeWordService.notifySpeechSynthesisStart();
-      } else {
-        // Pass false so the assistant speaking doesn't trigger spurious follow-up loops
-        wakeWordService.notifySpeechSynthesisEnd(false);
-      }
-    });
-    return unregister;
-  }, []);
-
-  // Configure Wake-Word Service Callbacks (Feature 1)
-  useEffect(() => {
-    wakeWordService.setCallbacks({
-      onWakeWordDetected: (event) => {
-        if (settings.audioFeedback) {
-          playChime('start_listen');
-        }
-        setIsListening(true);
-        setAssistantResponse('Listening…');
-      },
-      onUtterance: (query: string) => {
-        setIsListening(false);
-        if (query && query.trim()) {
-          setSpokenTranscript(query.trim());
-          handleUserQuery(query.trim());
-        }
-      },
-      onCommandDetected: (cmd) => {
-        if (cmd === 'stop' || cmd === 'cancel') {
-          streamingConversation.cancelActiveStream();
-          stopSpeaking();
-          setCurrentGoal(null);
-          setActiveRoute(null);
-          const stoppedMsg = 'Stopped current task.';
-          setAssistantResponse(stoppedMsg);
-          speakText(stoppedMsg, settings.speechRate);
-        } else if (cmd === 'repeat') {
-          speakText(assistantResponse, settings.speechRate);
-        } else if (cmd === 'continue') {
-          speakText('Continuing current task.', settings.speechRate);
-        }
-      },
-      onStateChange: (state) => {
-        setWakeWordState(state);
-      },
-      onError: (err) => {
-        console.warn('Wake word listener notice:', err);
-      },
-    });
-
-    wakeWordService.setSensitivity(settings.wakeWordSensitivity ?? 0.7);
-
-    if (settings.wakeWordEnabled) {
-      wakeWordService.start();
-    } else {
-      wakeWordService.stop();
-    }
-
-    return () => {
-      wakeWordService.stop();
-    };
-  }, [settings.wakeWordEnabled, settings.wakeWordSensitivity, settings.speechRate, settings.audioFeedback, assistantResponse]);
-
-  // Configure Temporal Tracker Callbacks (Feature 3)
-  useEffect(() => {
-    temporalTracker.setCallbacks({
-      onTargetLost: (targetLabel: string, _lastClockPosition: string) => {
-        if (
-          currentGoal &&
-          currentGoal.targetObject &&
-          targetLabel.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
-        ) {
-          const step: VerificationStep = {
-            id: `step-${Date.now()}`,
-            timestamp: Date.now(),
-            stepName: 'Target Lost Alert',
-            note: `${targetLabel} moved out of the active camera field of view. Slowly pan to re-acquire.`,
-            state: 'need_observation',
-            outcome: 're_aim_needed',
-          };
-          setCurrentGoal((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  state: 'need_observation',
-                  verificationSteps: [...(prev.verificationSteps || []), step],
-                }
-              : null
-          );
-        }
-      },
-      onTargetReacquired: (target: TrackedObject) => {
-        if (
-          currentGoal &&
-          currentGoal.targetObject &&
-          target.label.toLowerCase().includes(currentGoal.targetObject.toLowerCase())
-        ) {
-          if (settings.audioFeedback) {
-            playChime('capture');
-          }
-        }
-      },
-    });
-  }, [currentGoal, settings.audioFeedback]);
-
-  // Real Visual-Inertial SLAM Tracking Loop (Feature 5)
-  useEffect(() => {
-    if (!isCameraReady) return;
-
-    const slamTimer = setInterval(() => {
-      const video = cameraRef.current?.getVideoElement();
-      if (video && video.readyState >= 2 && !video.paused) {
-        const nextSlam = visualSlamService.processFrame(video);
-        setSlamState({ ...nextSlam });
-      }
-    }, 350);
-
-    return () => clearInterval(slamTimer);
-  }, [isCameraReady]);
 
   // Sync Hardware Telemetry from Wearable Gateway
   const syncWearableTelemetry = useCallback(async () => {
@@ -537,95 +295,6 @@ export default function App() {
     } catch {}
   };
 
-  // Feature 6: Plan and Execute Route Navigation
-  const handleNavigateToDestination = (destName: string) => {
-    const nodes = indoorNavigation.getAllNodes();
-    const targetNode = nodes.find(
-      (n: NavigationNode) =>
-        n.name.toLowerCase().includes(destName.toLowerCase()) ||
-        n.room.toLowerCase().includes(destName.toLowerCase())
-    );
-
-    if (!targetNode) {
-      const msg = `Destination "${destName}" not recognized in topological map.`;
-      setAssistantResponse(msg);
-      speakText(msg, settings.speechRate);
-      return;
-    }
-
-    const startNode =
-      indoorNavigation.findNearestNodeByCoords(slamState.pose.x, slamState.pose.z) || nodes[0];
-    const route = indoorNavigation.planRoute(startNode.name, targetNode.name);
-
-    if (route && route.steps && route.steps.length > 0) {
-      setActiveRoute(route);
-      const firstStepText = indoorNavigation.formatGuidanceStep(route.steps[0]);
-      const guidance = `Navigating to ${targetNode.name}. ${firstStepText}. Caution: Keep white cane sweeping.`;
-      setAssistantResponse(guidance);
-      speakText(guidance, settings.speechRate);
-
-      const navGoal: GoalTask = {
-        id: String(Date.now()),
-        intent: `Navigate to ${targetNode.name}`,
-        targetObject: targetNode.name,
-        state: 'active',
-        confidence: 0.85,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        history: [{ timestamp: Date.now(), note: `Initiated navigation to ${targetNode.name}`, state: 'active' }],
-        verificationSteps: [
-          {
-            id: `step-${Date.now()}`,
-            timestamp: Date.now(),
-            stepName: 'Path Computed',
-            note: `A* route found (${route.steps.length} checkpoints, ~${route.totalSteps} steps).`,
-            state: 'active',
-            outcome: 'success',
-          },
-        ],
-      };
-      setCurrentGoal(navGoal);
-      setActiveSection('spatial');
-    } else {
-      const msg = `Unable to compute a safe path to ${destName}. Obstacles may be blocking all routes.`;
-      setAssistantResponse(msg);
-      speakText(msg, settings.speechRate);
-    }
-  };
-
-  // Feature 4: Memory Backup Export/Import Handlers
-  const handleExportMemory = async () => {
-    try {
-      const jsonStr = await memoryService.exportBackupJson();
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `sentra-memory-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      a.click();
-      URL.revokeObjectURL(url);
-      speakText('Exported memory backup file.', settings.speechRate);
-    } catch (err) {
-      console.error('Export error:', err);
-    }
-  };
-
-  const handleImportMemory = async (file: File) => {
-    try {
-      const text = await file.text();
-      const ok = await memoryService.importBackupJson(text);
-      if (ok) {
-        const updated = await memoryService.getAllObjectMemories();
-        setMemories(updated);
-        speakText('Memory backup restored successfully.', settings.speechRate);
-      } else {
-        speakText('Failed to parse memory backup file.', settings.speechRate);
-      }
-    } catch (err) {
-      console.error('Import error:', err);
-    }
-  };
-
   // Execute Vision-Language Perception Pipeline (UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE)
   const executeAnalysis = useCallback(
     async (mode: SentraMode, query = '', goalTargetOverride?: string | null): Promise<boolean> => {
@@ -679,9 +348,8 @@ export default function App() {
 
         // If server produced no text, compute on-device local vision
         if (!spoken) {
-          const videoEl = cameraRef.current?.getVideoElement() || null;
           const localFallback = analyzeLocalScene(
-            videoEl,
+            cameraRef.current?.getVideoElement() || null,
             heading,
             memories,
             mode,
@@ -690,23 +358,12 @@ export default function App() {
           );
           spoken = localFallback.text;
           setIsLocalAssistActive(true);
-
-          const analysis = offlineVision.analyzeVideoFrame(videoEl, heading);
-          setLocalAnalysis(analysis);
-          updateStats((s) => ({ ...s, offlineScans: s.offlineScans + 1 }));
         }
 
-        // Feature 3: Update Detected & Temporally Tracked Objects
+        // Update perception state
         if (data.detectedObjects) {
           setDetectedObjects(data.detectedObjects);
-          const updatedTracks = temporalTracker.update(data.detectedObjects);
-          setTrackedObjects(updatedTracks);
-          updateStats((s) => ({
-            ...s,
-            trackingUpdates: s.trackingUpdates + updatedTracks.length,
-          }));
         }
-
         if (data.sceneDescription) {
           setSceneDescription(data.sceneDescription);
         }
@@ -730,7 +387,7 @@ export default function App() {
           setActiveHazard(null);
         }
 
-        // Process memory storage (Feature 4: Contextual Memory)
+        // Process memory storage
         if (mode === 'remember' && data.rememberedData) {
           const newMemory: SentraMemoryItem = {
             id: String(Date.now()),
@@ -762,6 +419,7 @@ export default function App() {
               note: spoken || `Verified ${activeGoalTarget} confirmed in camera observation.`,
               state: 'completed',
               outcome: 'success',
+              actionCategory: 'completed',
               heading,
               clockPosition: targetObj?.clockPosition || "12 o'clock",
               confidence: targetObj?.confidence || 0.95,
@@ -791,7 +449,7 @@ export default function App() {
               playChime('found');
             }
 
-            // Record verified observation in persistent memory
+            // Record verified observation
             if (activeGoalTarget) {
               const autoMemory: SentraMemoryItem = {
                 id: String(Date.now()),
@@ -813,9 +471,11 @@ export default function App() {
               note: data.activePerceptionRequest,
               state: 'need_observation',
               outcome: 're_aim_needed',
+              actionCategory: 'active',
               heading,
             };
 
+            // Needs additional observation
             setCurrentGoal((prev) =>
               prev
                 ? {
@@ -825,11 +485,7 @@ export default function App() {
                     updatedAt: Date.now(),
                     history: [
                       ...prev.history,
-                      {
-                        timestamp: Date.now(),
-                        note: `Perception adjustment: ${data.activePerceptionRequest}`,
-                        state: 'need_observation',
-                      },
+                      { timestamp: Date.now(), note: `Perception adjustment: ${data.activePerceptionRequest}`, state: 'need_observation' },
                     ],
                     verificationSteps: [...(prev.verificationSteps || []), directiveStep],
                   }
@@ -843,6 +499,7 @@ export default function App() {
               note: spoken || `Scanned view; target not yet confirmed.`,
               state: 'active',
               outcome: 'attempted',
+              actionCategory: 'attempted',
               heading,
             };
 
@@ -852,6 +509,46 @@ export default function App() {
                     ...prev,
                     updatedAt: Date.now(),
                     verificationSteps: [...(prev.verificationSteps || []), scanStep],
+                  }
+                : null
+            );
+          }
+        }
+
+        // Process conversational goal updates from Gemini
+        if (data.goalUpdate) {
+          if (!currentGoal && data.goalUpdate.state === 'active') {
+            const newGoal: GoalTask = {
+              id: String(Date.now()),
+              intent: query || data.goalUpdate.targetObject,
+              targetObject: data.goalUpdate.targetObject,
+              state: data.goalUpdate.state,
+              nextSafeAction: data.goalUpdate.nextAction,
+              confidence: 0.6,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              history: [{ timestamp: Date.now(), note: `Goal initiated: ${data.goalUpdate.targetObject}`, state: 'active' }],
+              verificationSteps: [
+                {
+                  id: `step-${Date.now()}-init`,
+                  timestamp: Date.now(),
+                  stepName: 'Goal Initiated',
+                  note: spoken || `Searching for ${data.goalUpdate.targetObject}.`,
+                  state: 'active',
+                  outcome: 'pending',
+                  heading,
+                },
+              ],
+            };
+            setCurrentGoal(newGoal);
+          } else if (currentGoal) {
+            setCurrentGoal((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    state: data.goalUpdate!.state || prev.state,
+                    nextSafeAction: data.goalUpdate!.nextAction || prev.nextSafeAction,
+                    updatedAt: Date.now(),
                   }
                 : null
             );
@@ -875,11 +572,15 @@ export default function App() {
           historyRef.current.push({ role: 'user', text: query });
         }
         historyRef.current.push({ role: 'assistant', text: spoken });
+        if (historyRef.current.length > 20) {
+          historyRef.current = historyRef.current.slice(-20);
+        }
 
         setAssistantResponse(spoken);
         speakText(spoken, settings.speechRate, () => {
+          // If wake word is enabled, re-enable listening seamlessly
           if (settings.wakeWordEnabled) {
-            wakeWordService.start();
+            startListening();
           }
         });
 
@@ -888,19 +589,14 @@ export default function App() {
         setIsProcessing(false);
         setIsLocalAssistActive(true);
 
-        const videoEl = cameraRef.current?.getVideoElement() || null;
         const localResult = analyzeLocalScene(
-          videoEl,
+          cameraRef.current?.getVideoElement() || null,
           heading,
           memories,
           mode,
           query,
           activeGoalTarget ?? null
         );
-
-        const localScan = offlineVision.analyzeVideoFrame(videoEl, heading);
-        setLocalAnalysis(localScan);
-        updateStats((s) => ({ ...s, offlineScans: s.offlineScans + 1 }));
 
         const safeSpeech = localResult.text;
         setAssistantResponse(safeSpeech);
@@ -922,30 +618,13 @@ export default function App() {
     if (!queryText.trim()) return;
     setSpokenTranscript(queryText);
 
-    // Stop / Cancel commands
+    // Stop command
     if (/\b(stop|cancel|never mind|pause|be quiet|shut up)\b/i.test(queryText)) {
-      streamingConversation.cancelActiveStream();
       setCurrentGoal(null);
-      setActiveRoute(null);
       stopSpeaking();
       const stoppedMsg = 'Stopped current task.';
       setAssistantResponse(stoppedMsg);
       speakText(stoppedMsg, settings.speechRate);
-      return;
-    }
-
-    // Repeat command
-    if (/\b(repeat|say that again|what did you say)\b/i.test(queryText)) {
-      speakText(assistantResponse, settings.speechRate);
-      return;
-    }
-
-    // Navigation command check ("navigate to ...", "guide me to ...")
-    const navMatch = queryText.match(
-      /\b(?:navigate to|guide me to|take me to|path to|go to|directions to)\s+(.+)/i
-    );
-    if (navMatch && navMatch[1]) {
-      handleNavigateToDestination(navMatch[1].trim());
       return;
     }
 
@@ -957,11 +636,10 @@ export default function App() {
         id: `step-${Date.now()}-1`,
         timestamp: Date.now(),
         stepName: `Search Initiated`,
-        note: `Goal set for "${intent.goal}". Starting visual search at heading ${
-          heading != null ? Math.round(heading) + '°' : 'view'
-        }.`,
+        note: `Goal set for "${intent.goal}". Starting visual search at heading ${heading != null ? Math.round(heading) + '°' : 'view'}.`,
         state: 'active',
         outcome: 'pending',
+        actionCategory: 'active',
         heading,
       };
 
@@ -978,84 +656,11 @@ export default function App() {
       };
       setCurrentGoal(newGoal);
       updateStats((s) => ({ ...s, findsStarted: s.findsStarted + 1 }));
-    }
-
-    // Feature 7: Offline Local Mode Check
-    const isOffline =
-      !navigator.onLine || settings.preferredPerceptionMode === 'offline_local';
-    if (isOffline) {
-      const video = cameraRef.current?.getVideoElement() || null;
-      const heading = cameraRef.current?.heading ?? telemetry.imu.heading ?? null;
-      const analysis = offlineVision.analyzeVideoFrame(video, heading);
-      setLocalAnalysis(analysis);
-      updateStats((s) => ({ ...s, offlineScans: s.offlineScans + 1 }));
-
-      const memMatch = memories.find((m) =>
-        queryText.toLowerCase().includes(m.label.toLowerCase())
-      );
-      const memNote = memMatch ? `I remember ${memMatch.label} was in the ${memMatch.room || 'area'}.` : null;
-
-      const offlineSpeech = offlineVision.generateOfflineResponse(intent.mode, analysis, memNote);
-      setAssistantResponse(offlineSpeech);
-      speakText(offlineSpeech, settings.speechRate);
-      setIsLocalAssistActive(true);
+      await executeAnalysis(intent.mode, queryText, intent.goal);
       return;
     }
 
-    // When user asks to find, locate, describe, or search for objects, execute full visual analysis with bounding boxes & confidence
-    if (intent.mode === 'find' || intent.mode === 'describe' || intent.mode === 'navigate') {
-      await executeAnalysis(intent.mode, queryText, intent.goal || currentGoal?.targetObject);
-      return;
-    }
-
-    // Feature 2: Real-time Streaming AI Conversation for general open-ended conversational questions
-    if (settings.streamingVoiceEnabled && intent.mode !== 'remember') {
-      setIsProcessing(true);
-      const capture = cameraRef.current?.captureFrame() || { dataUrl: null, quality: null };
-      const sensorsSummary = cameraRef.current?.getSensorsSummary() || '';
-      const heading = cameraRef.current?.heading ?? telemetry.imu.heading ?? null;
-
-      try {
-        await streamingConversation.streamTurn(
-          {
-            query: queryText,
-            image: capture.dataUrl,
-            mode: intent.mode,
-            goal: intent.goal || currentGoal?.targetObject,
-            memory: memories.slice(-30),
-            history: historyRef.current.slice(-6),
-            heading,
-            sensors: sensorsSummary,
-            useWearableFrame: useWearableFeed,
-          },
-          {
-            onChunk: (_chunk, fullText) => {
-              setAssistantResponse(fullText);
-            },
-            onSentence: (sentence) => {
-              speakText(sentence, settings.speechRate);
-            },
-            onComplete: (fullText) => {
-              setIsProcessing(false);
-              historyRef.current.push({ role: 'user', text: queryText });
-              historyRef.current.push({ role: 'assistant', text: fullText });
-              updateStats((s) => ({ ...s, calls: s.calls + 1 }));
-            },
-            onError: (err) => {
-              console.warn('Streaming error, falling back to batch analysis:', err);
-              setIsProcessing(false);
-              executeAnalysis(intent.mode, queryText, intent.goal || currentGoal?.targetObject);
-            },
-          }
-        );
-        return;
-      } catch (err) {
-        console.warn('Streaming failed, fallback:', err);
-        setIsProcessing(false);
-      }
-    }
-
-    await executeAnalysis(intent.mode, queryText, intent.goal || currentGoal?.targetObject);
+    await executeAnalysis(intent.mode, queryText, currentGoal?.targetObject);
   };
 
   // Continuous active perception search loop
@@ -1141,11 +746,9 @@ export default function App() {
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     stopSpeaking();
-    streamingConversation.cancelActiveStream();
 
     if (!SpeechRecognitionClass) {
-      const msg =
-        "Voice recognition isn't supported in this browser. Please use quick action buttons or text input.";
+      const msg = "Voice recognition isn't supported in this browser. Please use quick action buttons or text input.";
       setAssistantResponse(msg);
       speakText(msg, settings.speechRate);
       setShowTextInput(true);
@@ -1160,6 +763,7 @@ export default function App() {
 
       recognition.onresult = (event: any) => {
         let transcript = event.results[0]?.[0]?.transcript || '';
+        // Filter wake word if present
         if (transcript.toLowerCase().startsWith('hey sentra')) {
           transcript = transcript.replace(/^hey sentra[, ]*/i, '');
         }
@@ -1235,70 +839,31 @@ export default function App() {
 
         {/* Status Pills */}
         <div className="flex items-center gap-1.5 text-xs font-bold font-mono">
-          {/* SLAM Odometry Badge */}
           <span
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
-              slamState.status === 'tracking'
-                ? 'bg-success/20 text-success border border-success/40'
-                : slamState.status === 'degraded'
-                ? 'bg-warning/20 text-warning border border-warning/40'
-                : 'bg-secondary text-muted-foreground'
-            }`}
-            title={`Visual SLAM Odometry (${slamState.featureCount} points)`}
-          >
-            <Compass className="h-3 w-3" />
-            <span>SLAM {slamState.featureCount}p</span>
-          </span>
-
-          {/* Wearable Link Badge */}
-          <span
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
+            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 ${
               telemetry.connected
                 ? 'bg-success/20 text-success border border-success/40'
                 : 'bg-secondary text-muted-foreground'
             }`}
           >
             <Radio className="h-3 w-3" />
-            <span>{telemetry.connected ? 'Wearable' : 'Standby'}</span>
+            <span>{telemetry.connected ? 'Wearable Link' : 'Standby'}</span>
           </span>
 
-          {/* AI Perception Engine Badge */}
           <span
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
-              isLocalAssistActive || settings.preferredPerceptionMode === 'offline_local'
+            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 ${
+              isLocalAssistActive
                 ? 'bg-primary/20 text-primary border border-primary/40'
                 : 'bg-secondary text-foreground'
             }`}
           >
-            {isLocalAssistActive || settings.preferredPerceptionMode === 'offline_local' ? (
-              <Cpu className="h-3 w-3 text-primary" />
-            ) : (
-              <Sparkles className="h-3 w-3 text-primary" />
-            )}
-            <span>
-              {isLocalAssistActive || settings.preferredPerceptionMode === 'offline_local'
-                ? 'Local'
-                : 'Gemini'}
-            </span>
+            {isLocalAssistActive ? <Cpu className="h-3 w-3" /> : <Sparkles className="h-3 w-3 text-primary" />}
+            <span>{isLocalAssistActive ? 'On-Device' : 'Gemini AI'}</span>
           </span>
-
-          {/* User Account / Database Sync Button */}
-          <button
-            onClick={() => setIsAuthModalOpen(true)}
-            title={authState.isAuthenticated ? `Logged in as ${authState.user?.name} (SQLite synced)` : 'Sign in to sync memories & settings'}
-            className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] transition cursor-pointer ${
-              authState.isAuthenticated
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-emerald-500/30'
-                : 'bg-secondary text-muted-foreground hover:text-foreground hover:bg-neutral-800'
-            }`}
-          >
-            <User className="h-3 w-3" />
-            <span>{authState.isAuthenticated ? authState.user?.name.split(' ')[0] : 'Sign In'}</span>
-          </button>
         </div>
       </header>
 
-      {/* Navigation Tabs (7 Functional Areas) */}
+      {/* Navigation Tabs (Requirement 11: 7 Functional Areas) */}
       <nav
         aria-label="Application Sections"
         className="flex items-center gap-1 overflow-x-auto pb-1 no-scrollbar border-b border-border/40 text-xs font-bold"
@@ -1388,7 +953,7 @@ export default function App() {
         </button>
       </nav>
 
-      {/* Main Camera Viewport with SLAM & Tracking Overlays */}
+      {/* Main Camera Viewport (Always visible for real visual perception) */}
       <CameraView
         ref={cameraRef}
         findingGoal={currentGoal?.targetObject || null}
@@ -1399,15 +964,11 @@ export default function App() {
           updateSettings({ ...settings, cameraFacing: next });
         }}
         detectedObjects={detectedObjects}
-        trackedObjects={trackedObjects}
         hazard={activeHazard}
         activePerceptionPrompt={activePerceptionPrompt}
         useWearableFeed={useWearableFeed}
         wearableFrame={null}
         onCameraStatusChange={setIsCameraReady}
-        slamStatus={slamState.status}
-        slamFeatureCount={slamState.featureCount}
-        perceptionMode={settings.preferredPerceptionMode || 'hybrid'}
       />
 
       {/* Tab Content Display */}
@@ -1473,52 +1034,6 @@ export default function App() {
             <span>{isListening ? 'Listening…' : isProcessing ? 'Thinking…' : 'Hold to talk'}</span>
           </button>
 
-          {/* Hands-Free Wake-Word Status Bar */}
-          <div className="flex items-center justify-between rounded-xl bg-secondary/80 px-3 py-2 text-xs font-semibold text-muted-foreground border border-border/50">
-            <button
-              onClick={() => {
-                const next = !settings.wakeWordEnabled;
-                updateSettings({ ...settings, wakeWordEnabled: next });
-              }}
-              className="flex items-center gap-1.5 hover:text-foreground cursor-pointer transition text-left"
-              title="Click to toggle Hey SENTRA wake word"
-            >
-              <span
-                className={`h-2.5 w-2.5 rounded-full ${
-                  !settings.wakeWordEnabled
-                    ? 'bg-neutral-500'
-                    : wakeWordState === 'listening' || wakeWordState === 'detected'
-                    ? 'bg-primary animate-ping'
-                    : wakeWordState === 'standby'
-                    ? 'bg-emerald-400'
-                    : 'bg-amber-400'
-                }`}
-              />
-              <span>
-                {!settings.wakeWordEnabled
-                  ? 'Wake Word: Paused (Tap to enable)'
-                  : wakeWordState === 'standby'
-                  ? 'Say "Hey SENTRA"'
-                  : wakeWordState === 'listening'
-                  ? 'Listening for command…'
-                  : `Wake Word: ${wakeWordState}`}
-              </span>
-            </button>
-            <button
-              onClick={() => {
-                const next = !settings.wakeWordEnabled;
-                updateSettings({ ...settings, wakeWordEnabled: next });
-              }}
-              className={`text-[11px] font-mono px-2 py-0.5 rounded cursor-pointer transition ${
-                settings.wakeWordEnabled
-                  ? 'bg-emerald-950/60 border border-emerald-500/40 text-emerald-300'
-                  : 'bg-neutral-800 text-neutral-400 hover:text-white'
-              }`}
-            >
-              {settings.wakeWordEnabled ? 'Active' : 'Turn On'}
-            </button>
-          </div>
-
           {/* Quick Voice Mode Buttons Grid */}
           <div className="grid grid-cols-2 gap-2.5">
             <button
@@ -1531,9 +1046,7 @@ export default function App() {
             </button>
             <button
               onClick={() => {
-                const target = prompt(
-                  'What object should SENTRA locate? (e.g. water bottle, spectacles)'
-                );
+                const target = prompt('What object should SENTRA locate? (e.g. water bottle, spectacles)');
                 if (target?.trim()) {
                   handleUserQuery(`Find ${target.trim()}`);
                 }
@@ -1590,13 +1103,9 @@ export default function App() {
       {activeSection === 'vision' && (
         <LiveVisionView
           detectedObjects={detectedObjects}
-          trackedObjects={trackedObjects}
           sceneDescription={sceneDescription}
           pathIsClear={pathIsClear}
           hazard={activeHazard}
-          slamState={slamState}
-          perceptionMode={settings.preferredPerceptionMode || 'hybrid'}
-          localAnalysis={localAnalysis}
           onSelectObject={(obj) => handleUserQuery(`What is this ${obj.label}?`)}
         />
       )}
@@ -1619,10 +1128,6 @@ export default function App() {
           relationships={relationships}
           detectedObjects={detectedObjects}
           currentRoom={currentRoom}
-          slamState={slamState}
-          activeRoute={activeRoute}
-          onSelectDestination={handleNavigateToDestination}
-          onCancelRoute={() => setActiveRoute(null)}
         />
       )}
 
@@ -1642,18 +1147,10 @@ export default function App() {
             };
             updateMemories([...memories, item]);
           }}
-          onDeleteMemory={(id) => {
-            memoryService.deleteObjectMemory(id).catch(() => {});
-            updateMemories(memories.filter((m) => m.id !== id));
-          }}
-          onClearAll={() => {
-            memoryService.clearAllObjectMemories().catch(() => {});
-            updateMemories([]);
-          }}
+          onDeleteMemory={(id) => updateMemories(memories.filter((m) => m.id !== id))}
+          onClearAll={() => updateMemories([])}
           onSpeakMemory={(item) => speakText(`${item.label}: ${item.note}`, settings.speechRate)}
           onFindMemoryTarget={(label) => handleUserQuery(`Find ${label}`)}
-          onExportData={handleExportMemory}
-          onImportData={handleImportMemory}
         />
       )}
 
@@ -1675,16 +1172,6 @@ export default function App() {
           cameraReady={isCameraReady || Boolean(cameraRef.current?.isReady)}
         />
       )}
-
-      {/* Authentication & SQLite Database Sync Modal */}
-      <AuthModal
-        isOpen={isAuthModalOpen}
-        onClose={() => setIsAuthModalOpen(false)}
-        authState={authState}
-        onLoginSuccess={() => {
-          // Re-fetch data on login
-        }}
-      />
     </main>
   );
 }

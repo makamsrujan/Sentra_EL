@@ -25,6 +25,8 @@ export type VerificationStepOutcome =
   | 're_aim_needed'
   | 'inconclusive';
 
+export type VerificationActionCategory = 'completed' | 'active' | 'attempted';
+
 export interface VerificationStep {
   id: string;
   timestamp: number;
@@ -32,6 +34,7 @@ export interface VerificationStep {
   note: string;
   state: GoalStatus;
   outcome: VerificationStepOutcome;
+  actionCategory?: VerificationActionCategory;
   heading?: number | null;
   clockPosition?: string;
   confidence?: number;
@@ -137,8 +140,8 @@ export interface SentraStats {
   findsDone: number;
   findMs: number;
   retakes: number;
-  trackingUpdates: number;
-  offlineScans: number;
+  trackingUpdates?: number;
+  offlineScans?: number;
 }
 
 export interface FrameQuality {
@@ -163,10 +166,10 @@ export interface SentraSettings {
   autoContinuousFind: boolean;
   wakeWordEnabled: boolean; // "Hey SENTRA" activation
   selectedInputSource: 'browser_camera' | 'esp32_wearable';
-  streamingVoiceEnabled: boolean;
-  wakeWordSensitivity: number; // 0.1 to 1.0
+  streamingVoiceEnabled?: boolean;
+  wakeWordSensitivity?: number; // 0.1 to 1.0
   porcupineAccessKey?: string;
-  preferredPerceptionMode: PerceptionMode;
+  preferredPerceptionMode?: PerceptionMode;
 }
 
 // ----------------- ADVANCED AI CAPABILITY TYPES -----------------
@@ -375,6 +378,11 @@ export interface AnalysisResponseData {
   foundTarget?: boolean;
   spatialRelations?: Array<{ subject: string; relation: string; object: string }>;
   suggestedAction?: string;
+  goalUpdate?: {
+    targetObject: string;
+    state: GoalStatus;
+    nextAction?: string;
+  } | null;
   quotaExhausted?: boolean;
   simulated?: boolean;
   timestamp?: number;

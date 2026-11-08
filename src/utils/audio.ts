@@ -88,38 +88,6 @@ export function playChime(type: 'start_listen' | 'stop_listen' | 'found' | 'haza
   }
 }
 
-type SpeechStateListener = (speaking: boolean) => void;
-const speechListeners: SpeechStateListener[] = [];
-
-export function registerSpeechListener(listener: SpeechStateListener): () => void {
-  speechListeners.push(listener);
-  return () => {
-    const idx = speechListeners.indexOf(listener);
-    if (idx >= 0) speechListeners.splice(idx, 1);
-  };
-}
-
-function notifySpeechState(speaking: boolean) {
-  speechListeners.forEach((fn) => {
-    try {
-      fn(speaking);
-    } catch {}
-  });
-}
-
-/**
- * Clean spoken text of any residual markdown or symbols to ensure clear vocalization
- */
-function cleanSpeechText(raw: string): string {
-  return raw
-    .replace(/\*+/g, '') // remove markdown bold/italics
-    .replace(/#+/g, '') // remove headings
-    .replace(/[`_~]/g, '') // remove code marks, underscores, strikethroughs
-    .replace(/\[\d+\]/g, '') // remove citation brackets
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
 /**
  * Text-to-speech speaker using window.speechSynthesis
  */
@@ -128,45 +96,30 @@ export function speakText(text: string, rate = 1.05, onEnd?: () => void) {
 
   try {
     window.speechSynthesis.cancel();
-    const cleaned = cleanSpeechText(text);
-    if (!cleaned) {
-      notifySpeechState(false);
-      return;
-    }
+    if (!text || text.trim() === '') return;
 
-    const utterance = new SpeechSynthesisUtterance(cleaned);
-    utterance.rate = Math.min(1.15, Math.max(0.9, rate));
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = rate;
     utterance.pitch = 1.0;
 
-    // Pick the highest clarity natural English voice
+    // Pick a natural English voice if available
     const voices = window.speechSynthesis.getVoices();
-    const preferredVoice =
-      voices.find((v) => v.lang.startsWith('en') && (v.name.includes('Samantha') || v.name.includes('Karen') || v.name.includes('Daniel') || v.name.includes('Natural') || v.name.includes('Google'))) ||
-      voices.find((v) => v.lang.startsWith('en-US') || v.lang.startsWith('en-GB')) ||
-      voices.find((v) => v.lang.startsWith('en'));
+    const preferredVoice = voices.find(
+      (v) => v.lang.startsWith('en') && (v.name.includes('Natural') || v.name.includes('Neural') || v.name.includes('Google') || v.name.includes('Siri'))
+    ) || voices.find((v) => v.lang.startsWith('en'));
 
     if (preferredVoice) {
       utterance.voice = preferredVoice;
     }
 
-    utterance.onstart = () => {
-      notifySpeechState(true);
-    };
-
-    utterance.onend = () => {
-      notifySpeechState(false);
-      if (onEnd) onEnd();
-    };
-
-    utterance.onerror = () => {
-      notifySpeechState(false);
-      if (onEnd) onEnd();
-    };
+    if (onEnd) {
+      utterance.onend = onEnd;
+      utterance.onerror = () => onEnd();
+    }
 
     window.speechSynthesis.speak(utterance);
   } catch (err) {
     console.warn('SpeechSynthesis error:', err);
-    notifySpeechState(false);
   }
 }
 
@@ -174,7 +127,6 @@ export function stopSpeaking() {
   if (typeof window !== 'undefined' && window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
-  notifySpeechState(false);
 }
 
 export function isSpeaking(): boolean {
