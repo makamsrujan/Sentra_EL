@@ -81,8 +81,8 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
-          type: 'module',
+          // Dev SW uses Vite HMR WebSockets; keep disabled in HMR-off dev server (full SW + manifest are built for production)
+          enabled: false,
         },
       }),
     ],

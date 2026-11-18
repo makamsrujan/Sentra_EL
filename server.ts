@@ -574,10 +574,19 @@ async function startServer() {
           name: 'sentra-disable-hmr-websocket',
           transform(code, id) {
             if (id.includes('vite/dist/client/client.mjs')) {
-              return code.replace(
-                'transport.connect(createHMRHandler(handleMessage));',
-                '/* HMR disabled in server middleware mode; skip WebSocket connection */'
-              );
+              return code
+                .replace(
+                  'transport.connect(createHMRHandler(handleMessage));',
+                  '/* HMR disabled in server middleware mode; skip WebSocket connection */'
+                )
+                .replace(
+                  'else throw new SendBeforeConnectError("send was called before connect");',
+                  'else return;'
+                )
+                .replace(
+                  'else throw new SendBeforeConnectError("invoke was called before connect");',
+                  'else return;'
+                );
             }
           },
         },
