@@ -567,7 +567,21 @@ async function startServer() {
       server: {
         middlewareMode: true,
         hmr: false,
+        ws: false,
       },
+      plugins: [
+        {
+          name: 'sentra-disable-hmr-websocket',
+          transform(code, id) {
+            if (id.includes('vite/dist/client/client.mjs')) {
+              return code.replace(
+                'transport.connect(createHMRHandler(handleMessage));',
+                '/* HMR disabled in server middleware mode; skip WebSocket connection */'
+              );
+            }
+          },
+        },
+      ],
       appType: 'spa',
     });
     app.use(vite.middlewares);
