@@ -11,9 +11,23 @@ interface UseDeviceTelemetryOptions {
     severity: 'caution' | 'critical';
     description: string;
   }) => void;
+  onVoiceTurn?: (turn: {
+    turnId: string;
+    deviceId: string;
+    sequence: number;
+    status: string;
+    wakeDetected?: boolean;
+    transcript?: string;
+    command?: string;
+    spokenResponse?: string;
+    reasoning?: string;
+    analysis?: any;
+    audioReplyId?: string | null;
+    timestamp: number;
+  }) => void;
 }
 
-export function useDeviceTelemetry({ selectedDeviceId, onAlert }: UseDeviceTelemetryOptions) {
+export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn }: UseDeviceTelemetryOptions) {
   const [devices, setDevices] = useState<DeviceLiveState[]>([]);
   const [activeDevice, setActiveDevice] = useState<DeviceLiveState | null>(null);
   const [sseConnected, setSseConnected] = useState(false);
@@ -25,6 +39,8 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert }: UseDeviceTelem
 
   const onAlertRef = useRef(onAlert);
   onAlertRef.current = onAlert;
+  const onVoiceTurnRef = useRef(onVoiceTurn);
+  onVoiceTurnRef.current = onVoiceTurn;
   const lastAlertKeyRef = useRef<{ key: string; ts: number }>({ key: '', ts: 0 });
   const selectedDeviceRef = useRef(selectedDeviceId);
   selectedDeviceRef.current = selectedDeviceId;
@@ -159,6 +175,14 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert }: UseDeviceTelem
               });
             }
           }
+        } catch {}
+      });
+
+      es.addEventListener('voice_turn', (ev: MessageEvent) => {
+        if (closed) return;
+        try {
+          const turn = JSON.parse(ev.data);
+          onVoiceTurnRef.current?.(turn);
         } catch {}
       });
 

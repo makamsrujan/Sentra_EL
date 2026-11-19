@@ -196,6 +196,10 @@ Hardware writes/polling use `Authorization: Bearer <token>` or `X-Device-Token: 
 | `GET` | `/api/device/stream` | Live device/alert notifications via SSE |
 | `GET` | `/api/device/poll?deviceId=...` | Authenticated retrieval of pending device actions |
 | `POST` | `/api/device/ack` | Authenticated acknowledgment of action IDs |
+| `POST` | `/api/device/audio/utterance` | Authenticated upload of 16 kHz Mono 16-bit PCM WAV utterance (max 8s, 512KB) |
+| `GET` | `/api/device/audio/reply/:replyId` | Authenticated download of generated speech WAV (24 kHz PCM) for earphone playback |
+| `GET` | `/api/device/audio/status` | Codec, STT/TTS models, active replies, and audio ownership diagnostics |
+| `POST` | `/api/device/audio/ownership` | Select audio ownership mode (`wearable`, `browser`, `test`) to prevent duplicate speech |
 | `GET` | `/api/analytics` | Event aggregates, sensor history, alert history |
 | `GET` | `/api/events` | Paginated sensor events |
 | `GET` | `/api/events/export` | Export stored events |
@@ -213,19 +217,29 @@ The developer simulator uses separate `/api/device/simulate` and `/api/device/si
 ## Repository guide
 
 ```text
+firmware/
+  esp32s3/                 # ESP-IDF C firmware for ESP32-S3 + Waveshare WM8960
+    include/               # Pinout matrix, codec headers, I2S and alert definitions
+    src/                   # WM8960 I2C driver, I2S audio, local alerts, HTTP client
+    README.md              # Hardware wiring, CTIA headset setup, build and flash guide
 src/
-  App.tsx                  # Main SENTRA web experience
+  App.tsx                  # Main SENTRA web experience (with audio ownership coordination)
   components/              # Assistant, camera, memory, analytics, diagnostics UI
   hooks/                   # Camera, speech, wearable frames, telemetry, PWA hooks
   services/                # Browser camera and backend API clients
-  types/                   # Shared app and ESP32 protocol types
+  types/                   # Shared app and ESP32 protocol types (extended for audio)
   utils/                   # Parsing, audio, local visual heuristics
 server/
+  audio/                   # Hardware audio subsystem
+    speechToText.ts        # Multimodal Gemini STT and wake-phrase parser
+    textToSpeech.ts        # Multimodal Gemini TTS with WAV normalization
+    voiceTurnService.ts    # Voice turn pipeline integrating existing SENTRA reasoning
+    audioReplyStore.ts     # Bounded, auto-expiring in-memory reply cache
   deviceGateway.ts         # Device state, authenticated communication, events
   eventStore.ts            # SQLite storage and analytics
   geminiService.ts         # Gemini reasoning and response handling
-  validation.ts            # Input and response validation
-server.ts                  # Express API and frontend serving
+  validation.ts            # Input, JPEG, and WAV audio validation
+server.ts                  # Express API, authenticated audio routes, frontend serving
 vite.config.ts             # Vite and PWA configuration
 .env.example               # Example runtime configuration
 ```

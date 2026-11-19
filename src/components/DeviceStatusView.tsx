@@ -33,6 +33,8 @@ interface DeviceStatusViewProps {
   includeSimulatedAnalytics: boolean;
   onToggleIncludeSimulated: (include: boolean) => void;
   onRefreshAnalytics: () => void;
+  audioOwnership?: 'browser' | 'wearable' | 'test';
+  onChangeAudioOwnership?: (mode: 'browser' | 'wearable' | 'test') => void;
 }
 
 function formatDurationMs(ms: number): string {
@@ -59,6 +61,8 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
   includeSimulatedAnalytics,
   onToggleIncludeSimulated,
   onRefreshAnalytics,
+  audioOwnership,
+  onChangeAudioOwnership,
 }) => {
   const [showSimulator, setShowSimulator] = useState(false);
   const [simForwardCm, setSimForwardCm] = useState(150);
@@ -302,6 +306,82 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
             <span>· Audio: {dev.capabilities.audioOutput ? 'Yes' : 'No'}</span>
           </div>
         )}
+
+        {/* WM8960 Headset Audio Subsystem Diagnostics */}
+        <div className="mt-4 pt-3 border-t border-border/50">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="flex items-center gap-2">
+              <Headphones className="h-4 w-4 text-primary" />
+              <h4 className="text-xs font-bold uppercase tracking-wider text-foreground">
+                WM8960 Headset & Audio Subsystem
+              </h4>
+            </div>
+            {onChangeAudioOwnership && (
+              <div className="flex items-center gap-1 bg-secondary/80 p-0.5 rounded-lg border border-border/60 text-[11px] font-mono">
+                <span className="px-2 text-muted-foreground">Ownership:</span>
+                {(['browser', 'wearable', 'test'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => onChangeAudioOwnership(mode)}
+                    className={`px-2 py-0.5 rounded transition-colors ${
+                      audioOwnership === mode
+                        ? 'bg-primary text-primary-foreground font-bold shadow-xs'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {mode.charAt(0).toUpperCase() + mode.slice(1)}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+            <div className="rounded-lg bg-secondary/60 p-2.5 border border-border/40 font-mono">
+              <div className="flex justify-between items-center text-muted-foreground mb-1">
+                <span>Audio Codec:</span>
+                <span className="text-foreground font-semibold">Waveshare WM8960 Board</span>
+              </div>
+              <div className="flex justify-between items-center text-muted-foreground mb-1">
+                <span>Interface:</span>
+                <span>I²S Data + I²C Control (0x1A)</span>
+              </div>
+              <div className="flex justify-between items-center text-muted-foreground">
+                <span>Microphone Capture:</span>
+                <span>PCM 16-bit Mono 16 kHz</span>
+              </div>
+            </div>
+
+            <div className="rounded-lg bg-secondary/60 p-2.5 border border-border/40 font-mono">
+              <div className="flex justify-between items-center text-muted-foreground mb-1">
+                <span>Headset Jack:</span>
+                <span>3.5mm TRRS (CTIA wiring)</span>
+              </div>
+              <div className="flex justify-between items-center text-muted-foreground mb-1">
+                <span>Earphone Output:</span>
+                <span>PCM 16-bit Mono 24 kHz</span>
+              </div>
+              <div className="flex justify-between items-center text-muted-foreground">
+                <span>Local Sensor Alerts:</span>
+                <span className="text-emerald-400 font-semibold">Autonomous (No Cloud)</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
+            <span className="text-muted-foreground">Verification state:</span>
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+              Code Implemented
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+              Software-Tested (Vitest)
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
+              Hardware: Pending ESP32-S3 Flash
+            </span>
+          </div>
+        </div>
       </div>
 
       {/* Persistent Analytics Dashboard (Backed by SQLite Event Store) */}

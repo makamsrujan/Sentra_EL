@@ -515,3 +515,216 @@ export function sanitizeGeminiResponse(
       typeof rawObj?.suggestedAction === 'string' ? rawObj.suggestedAction.trim() : null,
   };
 }
+
+// -------------------------------------------------------------
+// HARDWARE AUDIO / WAV VALIDATION & UTILITIES
+// -------------------------------------------------------------
+export const MAX_AUDIO_UPLOAD_BYTES = 512 * 1024; // 512 KB
+export const MAX_AUDIO_DURATION_MS = 8000; // 8.0 seconds
+
+export interface WavValidationResult {
+  valid: boolean;
+  sampleRate?: number;
+  channels?: number;
+  bitsPerSample?: number;
+  dataBytes?: number;
+  durationMs?: number;
+  error?: string;
+}
+
+export function validateWavBuffer(
+  buffer: Buffer,
+  options?: {
+    expectedSampleRate?: number;
+    expectedChannels?: number;
+    maxDurationMs?: number;
+  }
+): WavValidationResult {
+  if (!Buffer.isBuffer(buffer)) {
+    return { valid: false, error: 'Expected binary Buffer for WAV validation.' };
+  }
+  if (buffer.length < 44) {
+    return { valid: false, error: 'Buffer is too small to contain a valid WAV header (min 44 bytes).' };
+  }
+  if (buffer.length > MAX_AUDIO_UPLOAD_BYTES) {
+    return {
+      valid: false,
+      error: `Audio upload exceeds maximum size limit of ${MAX_AUDIO_UPLOAD_BYTES} bytes (received ${buffer.length}).`,
+    };
+  }
+
+  // RIFF header
+  const chunkId = buffer.toString('ascii', 0, 4);
+  const format = buffer.toString('ascii', 8, 12);
+  if (chunkId !== 'RIFF' || format !== 'WAVE') {
+    return { valid: false, error: 'Invalid WAV container: missing RIFF/WAVE header markers.' };
+  }
+
+  let offset = 12;
+  let audioFormat: number | null = null;
+  let numChannels: number | null = null;
+  let sampleRate: number | null = null;
+  let bitsPerSample: number | null = null;
+  let dataBytes: number | null = null;
+
+  while (offset + 8 <= buffer.length) {
+    const subchunkId = buffer.toString('ascii', offset, offset + 4);
+    const subchunkSize = buffer.readUInt32LE(offset + 4);
+    const nextOffset = offset + 8 + subchunkSize;
+
+    if (subchunkId === 'fmt ') {
+      if (subchunkSize < 16 || offset + 8 + 16 > buffer.length) {
+        return { valid: false, error: 'Malformed fmt chunk in WAV file.' };
+      }
+      audioFormat = buffer.readUInt16LE(offset + 8);
+      numChannels = buffer.readUInt16LE(offset + 10);
+      sampleRate = buffer.readUInt32LE(offset + 12);
+      bitsPerSample = buffer.readUInt16LE(offset + 22);
+    } else if (subchunkId === 'data') {
+      dataBytes = subchunkSize;
+      break;
+    }
+
+    offset = nextOffset;
+  }
+
+  if (audioFormat === null || numChannels === null || sampleRate === null || bitsPerSample === null) {
+    return { valid: false, error: 'Missing required fmt chunk in WAV file.' };
+  }
+  if (dataBytes === null) {
+    return { valid: false, error: 'Missing required data chunk in WAV file.' };
+  }
+  if (audioFormat !== 1) {
+    return { valid: false, error: `Unsupported audio format code (${audioFormat}). Expected uncompressed PCM (1).` };
+  }
+
+  const expectedChannels = options?.expectedChannels ?? 1;
+  if (numChannels !== expectedChannels) {
+    return {
+      valid: false,
+      error: `Unsupported channel count (${numChannels}). Expected mono (${expectedChannels} channel).`,
+    };
+  }
+
+  const expectedSampleRate = options?.expectedSampleRate ?? 16000;
+  if (sampleRate !== expectedSampleRate) {
+    return {
+      valid: false,
+      error: `Unsupported sample rate (${sampleRate} Hz). Expected ${expectedSampleRate} Hz.`,
+    };
+  }
+
+  if (bitsPerSample !== 16) {
+    return {
+      valid: false,
+      error: `Unsupported bit depth (${bitsPerSample} bits). Expected 16-bit PCM.`,
+    };
+  }
+
+  if (dataBytes <= 0) {
+    return { valid: false, error: 'Audio data chunk is empty (0 bytes).' };
+  }
+
+  const bytesPerSecond = sampleRate * numChannels * (bitsPerSample / 8);
+  const durationMs = Math.round((dataBytes / bytesPerSecond) * 1000);
+  const maxDuration = options?.maxDurationMs ?? MAX_AUDIO_DURATION_MS;
+
+  if (durationMs > maxDuration) {
+    return {
+      valid: false,
+      durationMs,
+      sampleRate,
+      channels: numChannels,
+      bitsPerSample,
+      dataBytes,
+      error: `Audio recording duration (${durationMs} ms) exceeds the ${maxDuration} ms maximum limit.`,
+    };
+  }
+
+  return {
+    valid: true,
+    sampleRate,
+    channels: numChannels,
+    bitsPerSample,
+    dataBytes,
+    durationMs,
+  };
+}
+
+export function isAudioSilent(buffer: Buffer, thresholdRms = 150): boolean {
+  // Check PCM 16-bit signed audio samples
+  if (buffer.length < 44) return true;
+  // Locate data chunk
+  let offset = 12;
+  let dataOffset = 44;
+  let dataLength = buffer.length - 44;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString('ascii', offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    if (chunkId === 'data') {
+      dataOffset = offset + 8;
+      dataLength = Math.min(chunkSize, buffer.length - dataOffset);
+      break;
+    }
+    offset += 8 + chunkSize;
+  }
+
+  const sampleCount = Math.floor(dataLength / 2);
+  if (sampleCount === 0) return true;
+
+  let sumSquares = 0;
+  // Sample every 4th sample to save CPU on large buffers
+  const stride = 4;
+  let evaluated = 0;
+  for (let i = 0; i < sampleCount; i += stride) {
+    const sample = buffer.readInt16LE(dataOffset + i * 2);
+    sumSquares += sample * sample;
+    evaluated++;
+  }
+  const rms = Math.sqrt(sumSquares / Math.max(1, evaluated));
+  return rms < thresholdRms;
+}
+
+export function createWavHeader(
+  dataLength: number,
+  sampleRate = 24000,
+  channels = 1,
+  bitsPerSample = 16
+): Buffer {
+  const header = Buffer.alloc(44);
+  const byteRate = sampleRate * channels * (bitsPerSample / 8);
+  const blockAlign = channels * (bitsPerSample / 8);
+
+  // RIFF chunk descriptor
+  header.write('RIFF', 0, 4, 'ascii');
+  header.writeUInt32LE(36 + dataLength, 4);
+  header.write('WAVE', 8, 4, 'ascii');
+
+  // "fmt " sub-chunk
+  header.write('fmt ', 12, 4, 'ascii');
+  header.writeUInt32LE(16, 16); // Subchunk1Size (16 for PCM)
+  header.writeUInt16LE(1, 20); // AudioFormat (1 for PCM)
+  header.writeUInt16LE(channels, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+
+  // "data" sub-chunk
+  header.write('data', 36, 4, 'ascii');
+  header.writeUInt32LE(dataLength, 40);
+
+  return header;
+}
+
+export function createPcmWav(
+  pcmBuffer: Buffer,
+  sampleRate = 24000,
+  channels = 1,
+  bitsPerSample = 16
+): Buffer {
+  const header = createWavHeader(pcmBuffer.length, sampleRate, channels, bitsPerSample);
+  return Buffer.concat([header, pcmBuffer]);
+}
+

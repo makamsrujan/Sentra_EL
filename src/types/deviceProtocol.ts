@@ -2,6 +2,65 @@ export type CameraSourceType = 'browser_camera' | 'esp32_camera' | 'none';
 
 export type DeviceSourceMode = 'hardware' | 'simulator' | 'disconnected';
 
+export type AudioHardwareState =
+  | 'STANDBY'
+  | 'RECORDING'
+  | 'TRANSCRIBING'
+  | 'REASONING'
+  | 'SPEECH_GENERATION'
+  | 'PLAYBACK'
+  | 'ERROR'
+  | 'CANCELLED'
+  | 'DISCONNECTED';
+
+export type AudioOwnershipMode = 'browser' | 'wearable' | 'test';
+
+export interface AudioUtteranceResponse {
+  ok: boolean;
+  turnId?: string;
+  deviceId: string;
+  sequence: number;
+  durationMs?: number;
+  status: 'processing' | 'completed' | 'ignored_no_wake' | 'silent' | 'failed';
+  wakeDetected?: boolean;
+  transcript?: string;
+  reasoning?: string;
+  audioReplyId?: string | null;
+  error?: string;
+}
+
+export interface AudioReplyMetadata {
+  replyId: string;
+  deviceId: string;
+  mimeType: 'audio/wav';
+  sampleRate: number;
+  channels: number;
+  bitsPerSample: number;
+  durationMs: number;
+  sizeBytes: number;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface AudioStatusResponse {
+  ok: boolean;
+  codec: {
+    name: string;
+    inputFormat: string;
+    outputFormat: string;
+    sampleRate: number;
+    channels: number;
+  };
+  sttConfigured: boolean;
+  sttModel: string;
+  ttsConfigured: boolean;
+  ttsModel: string;
+  activeRepliesCount: number;
+  lastTurnLatencyMs: number | null;
+  lastTurnStatus: string | null;
+  ownershipMode: AudioOwnershipMode;
+}
+
 export type PathSafetyStatus =
   | 'unknown'
   | 'observation_available'
@@ -36,6 +95,8 @@ export interface TelemetryPayloadV1 {
   batteryCharging?: boolean | null;
   earphoneConnected?: boolean | null;
   audioVolume?: number | null;
+  audioState?: AudioHardwareState | null;
+  audioOwnership?: AudioOwnershipMode | null;
   sensors: {
     forwardDistanceCm: number | null;
     downwardDistanceMm: number | null;
@@ -58,6 +119,8 @@ export interface DeviceLiveState {
   batteryCharging: boolean | null;
   earphoneConnected: boolean | null;
   audioVolume: number | null;
+  audioState?: AudioHardwareState | null;
+  audioOwnership?: AudioOwnershipMode | null;
   sensors: {
     forwardDistanceCm: number | null;
     downwardDistanceMm: number | null;
@@ -95,6 +158,10 @@ export interface WearableActionItem {
   priority: 'normal' | 'critical';
   createdAt: number;
   acknowledgedAt: number | null;
+  audioReplyId?: string | null;
+  audioUrl?: string | null;
+  audioFormat?: 'wav' | null;
+  audioDurationMs?: number | null;
 }
 
 export interface RegisteredDeviceSummary {

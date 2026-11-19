@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { SentraEventStore } from './server/eventStore';
 import { DeviceGateway } from './server/deviceGateway';
+import { AudioReplyStore } from './server/audio/audioReplyStore';
+import { processWearableVoiceTurn } from './server/audio/voiceTurnService';
 import {
   getConfiguredModel,
   getLastWorkingModel,
@@ -19,10 +21,12 @@ import {
   AnalyzeRequestSchema,
   decodeBase64Image,
   DeviceRegistrationSchema,
+  MAX_AUDIO_UPLOAD_BYTES,
   MAX_FRAME_BYTES,
   MemoryCreateSchema,
   parseAndAdaptTelemetry,
   validateJpegBuffer,
+  validateWavBuffer,
 } from './server/validation';
 
 dotenv.config();
@@ -94,6 +98,19 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       limit: MAX_FRAME_BYTES + 1024,
     })
   );
+
+  // Raw binary WAV parser for ESP32-S3 audio utterances
+  app.use(
+    '/api/device/audio/utterance',
+    express.raw({
+      type: ['audio/wav', 'audio/x-wav', 'application/octet-stream'],
+      limit: MAX_AUDIO_UPLOAD_BYTES + 1024,
+    })
+  );
+
+  const audioReplyStore = new AudioReplyStore();
+  const lastProcessedAudioSequence = new Map<string, number>();
+  let audioOwnershipMode: 'browser' | 'wearable' | 'test' = 'wearable';
 
   app.use(express.json({ limit: '15mb' }));
   app.use(express.urlencoded({ extended: true, limit: '15mb' }));
@@ -378,6 +395,155 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     }
     const acknowledged = gateway.acknowledgeActions(parsed.data.deviceId, parsed.data.actionIds);
     return res.json({ ok: true, acknowledged });
+  });
+
+  // -------------------------------------------------------------
+  // HARDWARE AUDIO / WM8960 HEADSET ROUTES
+  // -------------------------------------------------------------
+  app.post('/api/device/audio/utterance', async (req, res) => {
+    const token = extractBearerOrHeaderToken(req);
+    const deviceId = (
+      req.header('x-device-id') ||
+      (typeof req.query.deviceId === 'string' ? req.query.deviceId : '') ||
+      req.body?.deviceId ||
+      'ESP32-S3-SENTRA-001'
+    )
+      .toString()
+      .trim();
+
+    if (!gateway.authenticateHardwareToken(token, deviceId)) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized hardware audio upload.' });
+    }
+
+    const seqHeader = req.header('x-sequence') || req.query.sequence || req.body?.sequence;
+    const sequence = Number.parseInt(String(seqHeader ?? '0'), 10);
+
+    // Prevent duplicate processing of the exact same recording sequence
+    const lastSeq = lastProcessedAudioSequence.get(deviceId);
+    if (lastSeq !== undefined && sequence > 0 && sequence === lastSeq) {
+      return res.status(409).json({
+        ok: false,
+        error: 'Duplicate audio recording sequence ignored.',
+        sequence,
+      });
+    }
+
+    let wavBuffer: Buffer | undefined;
+    let rawTranscript: string | undefined;
+
+    if (Buffer.isBuffer(req.body)) {
+      wavBuffer = req.body;
+    } else if (req.body && typeof req.body === 'object') {
+      if (typeof req.body.wavBase64 === 'string') {
+        wavBuffer = Buffer.from(req.body.wavBase64, 'base64');
+      }
+      if (typeof req.body.transcript === 'string') {
+        rawTranscript = req.body.transcript;
+      }
+    }
+
+    if (!wavBuffer && !rawTranscript) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Expected binary audio/wav body or JSON with wavBase64 or transcript.',
+      });
+    }
+
+    if (wavBuffer) {
+      const wavCheck = validateWavBuffer(wavBuffer, {
+        expectedChannels: 1,
+        expectedSampleRate: 16000,
+        maxDurationMs: 8000,
+      });
+      if (!wavCheck.valid) {
+        return res.status(400).json({
+          ok: false,
+          error: wavCheck.error || 'Invalid WAV audio buffer.',
+          durationMs: wavCheck.durationMs,
+        });
+      }
+    }
+
+    lastProcessedAudioSequence.set(deviceId, sequence);
+
+    try {
+      const turnResult = await processWearableVoiceTurn({
+        deviceId,
+        sequence,
+        wavBuffer,
+        rawTranscript,
+        gateway,
+        store,
+        audioReplyStore,
+        apiKey: process.env.GEMINI_API_KEY,
+      });
+
+      return res.status(turnResult.ok ? 200 : 422).json(turnResult);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return res.status(500).json({
+        ok: false,
+        deviceId,
+        sequence,
+        status: 'failed',
+        error: `Voice turn processing failed: ${message}`,
+      });
+    }
+  });
+
+  app.get('/api/device/audio/reply/:replyId', (req, res) => {
+    const { replyId } = req.params;
+    const token = extractBearerOrHeaderToken(req);
+    const deviceId = (
+      typeof req.query.deviceId === 'string' ? req.query.deviceId : req.header('x-device-id')
+    )?.trim();
+
+    if (deviceId && !gateway.authenticateHardwareToken(token, deviceId)) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized audio reply retrieval.' });
+    }
+
+    const reply = audioReplyStore.getReply(replyId, deviceId || undefined);
+    if (!reply) {
+      return res.status(404).json({ ok: false, error: 'Audio reply not found or expired.' });
+    }
+
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Content-Length', String(reply.buffer.length));
+    res.setHeader('X-Audio-Sample-Rate', String(reply.sampleRate));
+    res.setHeader('X-Audio-Duration-Ms', String(reply.durationMs));
+    res.setHeader('X-Device-Id', reply.deviceId);
+    return res.send(reply.buffer);
+  });
+
+  app.get('/api/device/audio/status', (_req, res) => {
+    return res.json({
+      ok: true,
+      codec: {
+        name: 'Waveshare WM8960 Standalone Audio Board',
+        inputFormat: 'PCM signed 16-bit little-endian Mono 16 kHz WAV',
+        outputFormat: 'PCM signed 16-bit little-endian Mono 24 kHz WAV',
+        sampleRate: 16000,
+        channels: 1,
+      },
+      sttConfigured: isGeminiApiKeyConfigured(),
+      sttModel: process.env.GEMINI_STT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      ttsConfigured: isGeminiApiKeyConfigured(),
+      ttsModel: process.env.GEMINI_TTS_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      activeRepliesCount: audioReplyStore.size(),
+      lastTurnLatencyMs: null,
+      lastTurnStatus: 'standby',
+      ownershipMode: audioOwnershipMode,
+    });
+  });
+
+  app.post('/api/device/audio/ownership', (req, res) => {
+    const mode = req.body?.mode;
+    if (mode === 'browser' || mode === 'wearable' || mode === 'test') {
+      audioOwnershipMode = mode;
+      gateway.broadcast('audio_ownership', { mode: audioOwnershipMode, timestamp: Date.now() });
+      return res.json({ ok: true, mode: audioOwnershipMode });
+    }
+    return res.status(400).json({ ok: false, error: 'Invalid mode. Expected "browser", "wearable", or "test".' });
   });
 
   // -------------------------------------------------------------

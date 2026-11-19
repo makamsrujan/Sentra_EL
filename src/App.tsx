@@ -302,11 +302,41 @@ export default function App() {
       if (settingsRef.current.audioFeedback) {
         playChime('hazard');
       }
-      speakText(alert.description, settingsRef.current.speechRate);
+      if (audioOwnership !== 'wearable' || !activeDeviceRef.current?.connected) {
+        speakText(alert.description, settingsRef.current.speechRate);
+      }
       updateStats((s) => ({ ...s, hazards: s.hazards + 1 }));
     },
     [updateStats]
   );
+
+  const [audioOwnership, setAudioOwnership] = useState<'browser' | 'wearable' | 'test'>('wearable');
+
+  const handleAudioOwnershipChange = useCallback(async (mode: 'browser' | 'wearable' | 'test') => {
+    setAudioOwnership(mode);
+    try {
+      await fetch('/api/device/audio/ownership', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+    } catch {}
+  }, []);
+
+  const handleWearableVoiceTurn = useCallback((turn: any) => {
+    if (turn.transcript) {
+      setSpokenTranscript(turn.transcript);
+    }
+    if (turn.spokenResponse) {
+      setAssistantResponse(turn.spokenResponse);
+    }
+    if (turn.analysis?.goalUpdate) {
+      setCurrentGoal(turn.analysis.goalUpdate);
+    }
+    if (turn.analysis?.hazard) {
+      setActiveHazard(turn.analysis.hazard);
+    }
+  }, []);
 
   const {
     devices,
@@ -322,6 +352,7 @@ export default function App() {
   } = useDeviceTelemetry({
     selectedDeviceId: settings.selectedWearableDeviceId,
     onAlert: handleTelemetryAlert,
+    onVoiceTurn: handleWearableVoiceTurn,
   });
 
   const activeDeviceRef = useRef(activeDevice);
@@ -760,7 +791,9 @@ export default function App() {
         }
 
         setAssistantResponse(spoken);
-        speakText(spoken, curSettings.speechRate);
+        if (audioOwnership !== 'wearable' || !activeDevice?.connected) {
+          speakText(spoken, curSettings.speechRate);
+        }
         return true;
       } catch (err: any) {
         isProcessingRef.current = false;
@@ -1700,6 +1733,8 @@ export default function App() {
               includeSimulatedAnalytics={includeSimulatedAnalytics}
               onToggleIncludeSimulated={setIncludeSimulatedAnalytics}
               onRefreshAnalytics={() => refreshAnalytics(null)}
+              audioOwnership={audioOwnership}
+              onChangeAudioOwnership={handleAudioOwnershipChange}
             />
           )}
 

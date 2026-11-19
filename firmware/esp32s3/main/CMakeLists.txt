@@ -1,0 +1,16 @@
+idf_component_register(
+    SRCS
+        "../src/main.c"
+        "../src/wm8960.c"
+        "../src/i2s_audio.c"
+        "../src/audio_http.c"
+        "../src/local_alerts.c"
+    INCLUDE_DIRS
+        "../include"
+    REQUIRES
+        driver
+        esp_http_client
+        json
+        nvs_flash
+        mbedtls
+)

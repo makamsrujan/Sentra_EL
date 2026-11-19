@@ -483,7 +483,15 @@ export class DeviceGateway {
 
   public enqueueAction(
     deviceId: string,
-    action: { type: WearableActionItem['type']; text: string; priority: WearableActionItem['priority'] }
+    action: {
+      type: WearableActionItem['type'];
+      text: string;
+      priority: WearableActionItem['priority'];
+      audioReplyId?: string | null;
+      audioUrl?: string | null;
+      audioFormat?: 'wav' | null;
+      audioDurationMs?: number | null;
+    }
   ): WearableActionItem | null {
     const state = this.devices.get(deviceId);
     if (!state) return null;
@@ -496,6 +504,10 @@ export class DeviceGateway {
       priority: action.priority,
       createdAt: Date.now(),
       acknowledgedAt: null,
+      audioReplyId: action.audioReplyId ?? null,
+      audioUrl: action.audioUrl ?? null,
+      audioFormat: action.audioFormat ?? null,
+      audioDurationMs: action.audioDurationMs ?? null,
     };
 
     state.actions.push(item);
