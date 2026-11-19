@@ -180,10 +180,14 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
     });
 
     it('rejects malformed audio uploads with 400', async () => {
-      const { app } = createSentraApp({ dbPath: ':memory:' });
+      const { app, gateway } = createSentraApp({ dbPath: ':memory:' });
       const server = app.listen(0);
       const port = (server.address() as any).port;
-      const devToken = process.env.SENTRA_DEVICE_TOKEN || 'sentra-dev-key-default';
+      const { provisionedToken: devToken } = gateway.registerDevice({
+        deviceId: 'ESP32-S3-SENTRA-001',
+        name: 'Audio test device',
+        capabilities: { camera: false, forwardToF: false, downwardToF: false, imu: false, audioOutput: true },
+      });
 
       const res = await fetch(`http://127.0.0.1:${port}/api/device/audio/utterance`, {
         method: 'POST',
@@ -206,10 +210,14 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
     it('processes a valid direct transcript utterance and returns voice turn status', async () => {
       const opToken = 'test-op-token-audio';
       process.env.SENTRA_OPERATOR_TOKEN = opToken;
-      const { app } = createSentraApp({ dbPath: ':memory:' });
+      const { app, gateway } = createSentraApp({ dbPath: ':memory:' });
       const server = app.listen(0);
       const port = (server.address() as any).port;
-      const devToken = process.env.SENTRA_DEVICE_TOKEN || 'sentra-dev-key-default';
+      const { provisionedToken: devToken } = gateway.registerDevice({
+        deviceId: 'ESP32-S3-SENTRA-001',
+        name: 'Audio test device',
+        capabilities: { camera: false, forwardToF: false, downwardToF: false, imu: false, audioOutput: true },
+      });
 
       // Send emergency stop via JSON transcript with operator token
       const res = await fetch(`http://127.0.0.1:${port}/api/device/audio/utterance`, {
@@ -259,10 +267,14 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
     it('enforces authentication on audio reply download and rejects mismatched device identity', async () => {
       const opToken = 'test-op-token-audio';
       process.env.SENTRA_OPERATOR_TOKEN = opToken;
-      const { app, audioReplyStore } = createSentraApp({ dbPath: ':memory:' });
+      const { app, gateway, audioReplyStore } = createSentraApp({ dbPath: ':memory:' });
       const server = app.listen(0);
       const port = (server.address() as any).port;
-      const devToken = process.env.SENTRA_DEVICE_TOKEN || 'sentra-dev-key-default';
+      const { provisionedToken: devToken } = gateway.registerDevice({
+        deviceId: 'ESP32-S3-SENTRA-001',
+        name: 'Audio test device',
+        capabilities: { camera: false, forwardToF: false, downwardToF: false, imu: false, audioOutput: true },
+      });
 
       // 1. Store a test reply directly in audioReplyStore
       const testBuffer = synthesizeTestToneWav(200);
