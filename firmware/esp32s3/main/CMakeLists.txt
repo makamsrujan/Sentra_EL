@@ -10,6 +10,7 @@ idf_component_register(
         "../src/i2s_audio.c"
         "../src/audio_http.c"
         "../src/local_alerts.c"
+        "../src/obstacle_awareness.c"
         "../src/wifi_transport.c"
         "../src/camera_driver.c"
         "../src/device_telemetry.c"

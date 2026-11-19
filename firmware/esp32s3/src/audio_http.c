@@ -1,6 +1,6 @@
 /**
  * @file audio_http.c
- * @brief ESP32-S3 HTTP REST Client for Audio Utterances, Replies, Action Polling & Acknowledgments.
+ * @brief ESP32-S3 HTTP REST Client for Action Polling, Acknowledgments & Optional Audio Turns.
  */
 
 #include "audio_http.h"
@@ -8,6 +8,7 @@
 #include "sentra_nvs_config.h"
 #include "camera_driver.h"
 #include "i2s_audio.h"
+#include "local_alerts.h"
 #include "wifi_transport.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
@@ -15,9 +16,30 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include "esp_heap_caps.h"
 
 static const char *TAG = "AUDIO_HTTP";
+
+typedef struct {
+    char *buf;
+    size_t capacity;
+    size_t len;
+} http_body_accum_t;
+
+static esp_err_t http_body_event_handler(esp_http_client_event_t *evt) {
+    if (evt->event_id == HTTP_EVENT_ON_DATA && evt->user_data && evt->data && evt->data_len > 0) {
+        http_body_accum_t *acc = (http_body_accum_t *)evt->user_data;
+        if (acc->capacity > 1 && acc->len < acc->capacity - 1) {
+            size_t avail = (acc->capacity - 1) - acc->len;
+            size_t copy_len = ((size_t)evt->data_len < avail) ? (size_t)evt->data_len : avail;
+            memcpy(acc->buf + acc->len, evt->data, copy_len);
+            acc->len += copy_len;
+            acc->buf[acc->len] = '\0';
+        }
+    }
+    return ESP_OK;
+}
 
 static esp_err_t post_action_ack(const sentra_runtime_config_t *cfg, const char **action_ids, int count) {
     if (!cfg || !action_ids || count <= 0) return ESP_OK;
@@ -68,6 +90,9 @@ static esp_err_t post_action_ack(const sentra_runtime_config_t *cfg, const char 
 }
 
 esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len, uint32_t sequence, sentra_http_utterance_result_t *out_result) {
+    if (!local_alerts_is_available() || !i2s_audio_is_ready()) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (!wav_buffer || wav_len == 0) return ESP_ERR_INVALID_ARG;
     if (!wifi_transport_is_connected()) return ESP_ERR_INVALID_STATE;
 
@@ -84,37 +109,37 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
     char seq_str[16];
     snprintf(seq_str, sizeof(seq_str), "%u", (unsigned)sequence);
 
-    char resp_buf[1024] = {0};
-    int resp_len = 0;
+    char *resp_buf = (char *)calloc(1, 1024);
+    if (!resp_buf) return ESP_ERR_NO_MEM;
+    http_body_accum_t accum = { .buf = resp_buf, .capacity = 1024, .len = 0 };
 
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 15000,
         .buffer_size = 1024,
+        .event_handler = http_body_event_handler,
+        .user_data = &accum,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return ESP_FAIL;
+    if (!client) {
+        free(resp_buf);
+        return ESP_FAIL;
+    }
 
     esp_http_client_set_header(client, "Content-Type", "audio/wav");
     esp_http_client_set_header(client, "X-Device-Id", cfg.device_id);
     esp_http_client_set_header(client, "X-Device-Token", cfg.device_token);
     esp_http_client_set_header(client, "X-Sequence", seq_str);
-
     esp_http_client_set_post_field(client, (const char *)wav_buffer, wav_len);
 
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         int status_code = esp_http_client_get_status_code(client);
-        resp_len = esp_http_client_read_response(client, resp_buf, sizeof(resp_buf) - 1);
-        if (resp_len >= 0 && resp_len < (int)sizeof(resp_buf)) {
-            resp_buf[resp_len] = '\0';
-        }
+        ESP_LOGI(TAG, "Audio upload HTTP status: %d (%u bytes)", status_code, (unsigned)accum.len);
 
-        ESP_LOGI(TAG, "Audio upload HTTP status: %d", status_code);
-
-        if (status_code == 200 && out_result) {
+        if (status_code == 200 && out_result && accum.len > 0) {
             cJSON *root = cJSON_Parse(resp_buf);
             if (root) {
                 cJSON *ok = cJSON_GetObjectItem(root, "ok");
@@ -126,7 +151,6 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
                 if (cJSON_IsString(status)) strncpy(out_result->status, status->valuestring, sizeof(out_result->status) - 1);
                 out_result->wake_detected = cJSON_IsTrue(wake);
                 if (cJSON_IsString(replyId)) strncpy(out_result->audio_reply_id, replyId->valuestring, sizeof(out_result->audio_reply_id) - 1);
-
                 cJSON_Delete(root);
             }
         } else if (status_code != 200) {
@@ -137,6 +161,7 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
     }
 
     esp_http_client_cleanup(client);
+    free(resp_buf);
     return err;
 }
 
@@ -145,6 +170,9 @@ esp_err_t audio_http_fetch_and_play_reply(const char *reply_id) {
     (void)reply_id;
     return ESP_ERR_NOT_SUPPORTED;
 #else
+    if (!local_alerts_is_available() || !i2s_audio_is_ready()) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (!reply_id || reply_id[0] == 0) return ESP_ERR_INVALID_ARG;
     if (!wifi_transport_is_connected()) return ESP_ERR_INVALID_STATE;
 
@@ -242,17 +270,23 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
     int len = snprintf(url, sizeof(url), "%s/api/device/poll?deviceId=%s", cfg.server_url, cfg.device_id);
     if (len < 0 || len >= (int)sizeof(url)) return ESP_ERR_INVALID_SIZE;
 
-    char resp_buf[2048] = {0};
-    int resp_len = 0;
+    char *resp_buf = (char *)calloc(1, 2048);
+    if (!resp_buf) return ESP_ERR_NO_MEM;
+    http_body_accum_t accum = { .buf = resp_buf, .capacity = 2048, .len = 0 };
 
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_GET,
         .timeout_ms = 5000,
+        .event_handler = http_body_event_handler,
+        .user_data = &accum,
     };
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return ESP_FAIL;
+    if (!client) {
+        free(resp_buf);
+        return ESP_FAIL;
+    }
 
     esp_http_client_set_header(client, "X-Device-Id", cfg.device_id);
     esp_http_client_set_header(client, "X-Device-Token", cfg.device_token);
@@ -260,14 +294,9 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
     esp_err_t err = esp_http_client_perform(client);
     if (err == ESP_OK) {
         int status_code = esp_http_client_get_status_code(client);
-        resp_len = esp_http_client_read_response(client, resp_buf, sizeof(resp_buf) - 1);
-        if (resp_len >= 0 && resp_len < (int)sizeof(resp_buf)) {
-            resp_buf[resp_len] = '\0';
-        }
-
         if (status_code != 200) {
             err = ESP_FAIL;
-        } else {
+        } else if (accum.len > 0) {
             cJSON *root = cJSON_Parse(resp_buf);
             if (root) {
                 cJSON *actions = cJSON_GetObjectItem(root, "actions");
@@ -294,6 +323,7 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
                                 cJSON *imu_ms = cJSON_GetObjectItem(payload, "imuSampleIntervalMs");
                                 cJSON *frm_ms = cJSON_GetObjectItem(payload, "frameUploadIntervalMs");
                                 cJSON *q_item = cJSON_GetObjectItem(payload, "jpegQuality");
+                                cJSON *fs_item = cJSON_GetObjectItem(payload, "frameSize");
                                 cJSON *caut = cJSON_GetObjectItem(payload, "proximityCautionCm");
                                 cJSON *crit = cJSON_GetObjectItem(payload, "proximityCriticalCm");
                                 sentra_nvs_config_update_tuning(
@@ -307,11 +337,20 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
                                 if (cJSON_IsNumber(q_item)) {
                                     (void)camera_driver_set_quality((uint8_t)q_item->valuedouble);
                                 }
+                                if (cJSON_IsString(fs_item)) {
+                                    if (strcmp(fs_item->valuestring, "QVGA") == 0) {
+                                        (void)camera_driver_set_framesize(SENTRA_CAM_SIZE_QVGA);
+                                    } else if (strcmp(fs_item->valuestring, "VGA") == 0) {
+                                        (void)camera_driver_set_framesize(SENTRA_CAM_SIZE_VGA);
+                                    } else if (strcmp(fs_item->valuestring, "SVGA") == 0) {
+                                        (void)camera_driver_set_framesize(SENTRA_CAM_SIZE_SVGA);
+                                    }
+                                }
                             }
                         }
 
-                        if (cJSON_IsString(replyId) && strlen(replyId->valuestring) > 0) {
-                            audio_http_fetch_and_play_reply(replyId->valuestring);
+                        if (local_alerts_is_available() && cJSON_IsString(replyId) && strlen(replyId->valuestring) > 0) {
+                            (void)audio_http_fetch_and_play_reply(replyId->valuestring);
                         }
 
                         if (cJSON_IsString(act_id) && ack_count < 16) {
@@ -329,5 +368,6 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
     }
 
     esp_http_client_cleanup(client);
+    free(resp_buf);
     return err;
 }

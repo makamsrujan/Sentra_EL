@@ -21,6 +21,7 @@ extern "C" {
  * Configures BCLK (GPIO 41), WS (GPIO 42), DOUT (GPIO 2), DIN (GPIO 1), and MCLK (GPIO 38).
  */
 esp_err_t i2s_audio_init(void);
+bool i2s_audio_is_ready(void);
 
 /**
  * @brief Record microphone audio into a WAV buffer (16 kHz, Mono, 16-bit PCM).

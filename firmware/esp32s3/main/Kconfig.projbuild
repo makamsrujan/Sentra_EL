@@ -3,7 +3,7 @@ menu "SENTRA firmware configuration"
 
 config SENTRA_FIRMWARE_VERSION
     string "Firmware version string"
-    default "1.1.0-prehw"
+    default "1.2.0-prehw"
 
 config SENTRA_WIFI_SSID
     string "Wi-Fi SSID"
@@ -25,12 +25,14 @@ config SENTRA_DEVICE_TOKEN
     string "Provisioned device token (secret; keep sdkconfig out of git)"
     default ""
 
+menu "Headband Baseline Sensors & Camera"
+
 config SENTRA_ENABLE_VL53L0X
     bool "Enable single forward VL53L0X ToF distance sensor"
     default y
     help
-        Confirmed single forward VL53L0X mounted on the headband.
-        Downward ToF is NOT installed on the baseline hardware.
+        Finalized baseline hardware has ONE forward VL53L0X mounted on the headband.
+        A second/downward VL53L0X does NOT exist on the baseline unit.
 
 config SENTRA_VL53L0X_ADDR
     hex "Forward VL53L0X 7-bit I2C address"
@@ -42,8 +44,11 @@ config SENTRA_ENABLE_MPU6050
     default y
 
 config SENTRA_ENABLE_CAMERA
-    bool "Enable OV2640 capture (requires verified board wiring)"
+    bool "Enable OV2640 parallel DVP capture (requires verified board wiring)"
     default n
+    help
+        Enable only after verifying physical ESP32-S3 pinout and keeping the OV2640
+        ribbon/harness short enough for reliable parallel DVP clock integrity.
 
 config SENTRA_CAM_SHARE_I2C_PORT
     bool "Share existing I2C port 0 for OV2640 SCCB"
@@ -51,35 +56,36 @@ config SENTRA_CAM_SHARE_I2C_PORT
     help
         Prevents esp32-camera from installing a duplicate I2C driver on shared SDA/SCL.
 
+config SENTRA_CAM_XCLK_HZ
+    int "OV2640 XCLK frequency in Hz (10 MHz conservative for wired harness)"
+    default 10000000
+    range 5000000 20000000
+
 config SENTRA_CAM_DEFAULT_QUALITY
     int "OV2640 JPEG quality (4=best, 63=lowest)"
     default 12
     range 4 63
 
+endmenu
+
+menu "Optional Expansion Modules (Disabled by Default)"
+
 config SENTRA_ENABLE_WM8960
     bool "Enable optional Waveshare WM8960 I2S audio codec"
     default n
     help
-        Keep disabled when testing headband OV2640 + VL53L0X + MPU6050 without audio board.
+        Optional expansion only. Keep disabled when running headband
+        OV2640 + VL53L0X + MPU6050 with mobile phone/browser voice audio.
 
 config SENTRA_ENABLE_VL53L5CX
     bool "Enable optional VL53L5CX multizone depth sensor"
     default n
     help
-        Optional capability flag; kept disabled and not required for normal operation.
+        Optional expansion only; not required for baseline operation.
 
-config SENTRA_ENABLE_VAD
-    bool "Enable on-device voice activity detection"
-    default n
-    help
-        Unavailable until a real voice activity detector is implemented.
-        This flag is deliberately not interpreted as proof of wake-word support.
+endmenu
 
-config SENTRA_ENABLE_INA219
-    bool "Enable optional power monitor"
-    default n
-    help
-        Requires implementation and verified INA219 wiring.
+menu "Provisional Pinout (Verify Before Powering Hardware)"
 
 config SENTRA_PIN_I2C_SDA
     int "Shared I2C SDA GPIO (provisional)"
@@ -94,8 +100,32 @@ config SENTRA_PIN_VL53L0X_FWD_XSHUT
     default 21
 
 config SENTRA_PIN_ACTION_BUTTON
-    int "User action / push-to-talk GPIO (provisional)"
+    int "User action / PTT GPIO (provisional, -1 to disable)"
     default 5
+
+config SENTRA_PIN_I2S_BCLK
+    int "Optional WM8960 I2S BCLK GPIO"
+    default 41
+
+config SENTRA_PIN_I2S_WS
+    int "Optional WM8960 I2S WS GPIO"
+    default 42
+
+config SENTRA_PIN_I2S_DOUT
+    int "Optional WM8960 I2S DOUT GPIO"
+    default 2
+
+config SENTRA_PIN_I2S_DIN
+    int "Optional WM8960 I2S DIN GPIO"
+    default 1
+
+config SENTRA_PIN_I2S_MCLK
+    int "Optional WM8960 I2S MCLK GPIO"
+    default 38
+
+endmenu
+
+menu "Sampling Intervals & Experimental Obstruction Thresholds"
 
 config SENTRA_TOF_SAMPLE_INTERVAL_MS
     int "VL53L0X sampling interval (ms)"
@@ -126,5 +156,17 @@ config SENTRA_PROXIMITY_CRITICAL_CM
     int "Experimental forward obstruction critical threshold (cm)"
     default 45
     range 10 150
+
+config SENTRA_PROXIMITY_HYSTERESIS_CM
+    int "Forward obstruction release hysteresis (cm)"
+    default 10
+    range 2 40
+
+config SENTRA_ALERT_COOLDOWN_MS
+    int "Minimum cooldown between repeated local alerts (ms)"
+    default 3000
+    range 500 30000
+
+endmenu
 
 endmenu

@@ -59,6 +59,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
         s_backoff_delay_ms = (s_backoff_delay_ms * 2 > BACKOFF_MAX_DELAY_MS)
                                  ? BACKOFF_MAX_DELAY_MS
                                  : s_backoff_delay_ms * 2;
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_STOP) {
+        s_state = WIFI_TRANSPORT_DISCONNECTED;
+        memset(s_assigned_ip, 0, sizeof(s_assigned_ip));
+        if (s_reconnect_timer) {
+            xTimerStop(s_reconnect_timer, 0);
+        }
+        if (s_wifi_event_group) {
+            xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        }
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         esp_ip4addr_ntoa(&event->ip_info.ip, s_assigned_ip, sizeof(s_assigned_ip));
@@ -80,15 +89,18 @@ esp_err_t wifi_transport_init(void) {
     if (s_wifi_event_group != NULL) return ESP_OK; // Already initialized
 
     s_wifi_event_group = xEventGroupCreate();
+    if (!s_wifi_event_group) return ESP_ERR_NO_MEM;
     s_reconnect_timer = xTimerCreate("wifi_rec", pdMS_TO_TICKS(1000), pdFALSE, NULL, reconnect_timer_callback);
 
     esp_err_t ret = esp_netif_init();
-    if (ret != ESP_OK) return ret;
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) return ret;
 
     ret = esp_event_loop_create_default();
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) return ret;
 
-    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (!s_sta_netif) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    }
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&cfg);
@@ -96,8 +108,10 @@ esp_err_t wifi_transport_init(void) {
 
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
+    ret = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, &instance_any_id);
+    if (ret != ESP_OK) return ret;
+    ret = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, &instance_got_ip);
+    if (ret != ESP_OK) return ret;
 
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
     if (ret != ESP_OK) return ret;

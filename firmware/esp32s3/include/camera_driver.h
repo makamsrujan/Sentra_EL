@@ -37,6 +37,7 @@ esp_err_t camera_driver_deinit(void);
 esp_err_t camera_driver_set_quality(uint8_t jpeg_quality);
 esp_err_t camera_driver_set_framesize(sentra_cam_framesize_t size);
 bool camera_driver_is_psram_active(void);
+bool camera_driver_is_ready(void);
 
 esp_err_t camera_driver_capture(sentra_camera_frame_t *out_frame);
 void camera_driver_release(sentra_camera_frame_t *frame);

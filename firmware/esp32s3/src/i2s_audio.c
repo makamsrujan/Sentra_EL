@@ -11,10 +11,17 @@
 
 static const char *TAG = "I2S_AUDIO";
 static volatile bool s_playback_abort_requested = false;
+static bool s_i2s_ready = false;
 
 #define I2S_PORT_NUM (I2S_NUM_0)
 
+bool i2s_audio_is_ready(void) {
+    return s_i2s_ready;
+}
+
 esp_err_t i2s_audio_init(void) {
+    if (s_i2s_ready) return ESP_OK;
+
     ESP_LOGI(TAG, "Initializing I2S port %d (BCLK=%d, WS=%d, DOUT=%d, DIN=%d, MCLK=%d)...",
              I2S_PORT_NUM, SENTRA_PIN_I2S_BCLK, SENTRA_PIN_I2S_WS,
              SENTRA_PIN_I2S_DOUT, SENTRA_PIN_I2S_DIN, SENTRA_PIN_I2S_MCLK);
@@ -50,13 +57,14 @@ esp_err_t i2s_audio_init(void) {
     ret = i2s_set_pin(I2S_PORT_NUM, &pin_config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to set I2S pins: %s", esp_err_to_name(ret));
+        i2s_driver_uninstall(I2S_PORT_NUM);
         return ret;
     }
 
-    // Set clock divider and initial sample rate
     i2s_set_clk(I2S_PORT_NUM, SENTRA_AUDIO_REC_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
     i2s_zero_dma_buffer(I2S_PORT_NUM);
 
+    s_i2s_ready = true;
     ESP_LOGI(TAG, "I2S duplex driver initialized successfully.");
     return ESP_OK;
 }
@@ -99,6 +107,8 @@ void i2s_audio_write_wav_header(uint8_t *header, uint32_t data_len, uint32_t sam
 }
 
 esp_err_t i2s_audio_record_wav(uint8_t *buffer, size_t max_buffer_size, uint32_t record_duration_ms, size_t *out_bytes_written) {
+    if (!s_i2s_ready) return ESP_ERR_INVALID_STATE;
+    if (!buffer || max_buffer_size <= SENTRA_AUDIO_WAV_HEADER_SIZE) return ESP_ERR_INVALID_ARG;
     if (record_duration_ms > 8000) record_duration_ms = 8000;
 
     size_t pcm_bytes_to_read = (SENTRA_AUDIO_REC_SAMPLE_RATE * 2 * record_duration_ms) / 1000;
@@ -139,6 +149,7 @@ esp_err_t i2s_audio_record_wav(uint8_t *buffer, size_t max_buffer_size, uint32_t
 }
 
 esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sample_rate) {
+    if (!s_i2s_ready) return ESP_ERR_INVALID_STATE;
     if (!audio_data || data_len == 0) return ESP_ERR_INVALID_ARG;
 
     s_playback_abort_requested = false;

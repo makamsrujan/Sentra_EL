@@ -1,7 +1,7 @@
 name: Verify SENTRA code
 on:
   push:
-    branches: [main]
+    branches: [main, "sentra/**"]
   pull_request:
   workflow_dispatch:
 
@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   application:
-    name: React and Express
+    name: React, Express, and Native C Firmware Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,6 +22,17 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
+      - name: Native C pre-hardware firmware unit suite (GCC -Werror)
+        run: |
+          gcc -Wall -Wextra -Werror -DSENTRA_FIRMWARE_HOST_TEST \
+            -Ifirmware/esp32s3/include -Ifirmware/esp32s3/tests \
+            firmware/esp32s3/tests/test_firmware.c \
+            firmware/esp32s3/src/vl53l0x.c \
+            firmware/esp32s3/src/mpu6050.c \
+            firmware/esp32s3/src/obstacle_awareness.c \
+            firmware/esp32s3/src/local_alerts.c \
+            firmware/esp32s3/src/device_telemetry.c \
+            -lm -o /tmp/sentra_fw_test && /tmp/sentra_fw_test
       - name: Simulator-labeled HTTP API smoke
         env:
           SENTRA_OPERATOR_TOKEN: ci-local-test-token
@@ -41,11 +52,11 @@ jobs:
           node simulator/esp32_sim.mjs
 
   esp32s3:
-    name: ESP32-S3 firmware build (not a hardware test)
+    name: ESP32-S3 ESP-IDF v5.3 firmware build (not a hardware test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build ESP-IDF firmware
+      - name: Build ESP-IDF v5.3 firmware (esp32s3 target)
         uses: espressif/esp-idf-ci-action@v1
         with:
           esp_idf_version: release-v5.3

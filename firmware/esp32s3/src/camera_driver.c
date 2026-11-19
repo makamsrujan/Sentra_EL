@@ -5,16 +5,20 @@
 
 #include "camera_driver.h"
 #include "board_profile.h"
+#include "i2c_bus.h"
 #include "esp_log.h"
 #include "esp_camera.h"
 #include "esp_http_client.h"
 #include "esp_timer.h"
 #include "esp_psram.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <string.h>
 #include <stdio.h>
 
 static const char *TAG = "CAMERA_DRIVER";
 static camera_fb_t *s_active_fb = NULL;
+static SemaphoreHandle_t s_fb_mutex = NULL;
 static bool s_cam_initialized = false;
 static bool s_psram_active = false;
 static uint8_t s_consecutive_errors = 0;
@@ -25,11 +29,36 @@ static uint8_t clamp_quality(uint8_t q) {
     return q;
 }
 
+static bool lock_sccb_if_shared(void) {
+#ifdef CONFIG_SENTRA_CAM_SHARE_I2C_PORT
+    if (sentra_i2c_bus_is_ready()) {
+        return sentra_i2c_bus_lock(500);
+    }
+#endif
+    return false;
+}
+
+static void unlock_sccb_if_shared(bool locked) {
+#ifdef CONFIG_SENTRA_CAM_SHARE_I2C_PORT
+    if (locked) {
+        sentra_i2c_bus_unlock();
+    }
+#else
+    (void)locked;
+#endif
+}
+
 esp_err_t camera_driver_init(void) {
     if (s_cam_initialized) return ESP_OK;
 
+    if (!s_fb_mutex) {
+        s_fb_mutex = xSemaphoreCreateMutex();
+        if (!s_fb_mutex) return ESP_ERR_NO_MEM;
+    }
+
     s_psram_active = esp_psram_is_initialized();
-    ESP_LOGI(TAG, "Initializing OV2640 camera on parallel DVP bus (PSRAM=%s)...",
+    ESP_LOGI(TAG, "Initializing OV2640 camera (XCLK=%d Hz, PSRAM=%s)...",
+             (int)BOARD_CAM_XCLK_HZ,
              s_psram_active ? "enabled" : "unavailable-DRAM-fallback");
 
     camera_config_t config = {0};
@@ -58,7 +87,7 @@ esp_err_t camera_driver_init(void) {
 #endif
     config.pin_pwdn = BOARD_PIN_CAM_PWDN;
     config.pin_reset = BOARD_PIN_CAM_RESET;
-    config.xclk_freq_hz = 20000000;
+    config.xclk_freq_hz = BOARD_CAM_XCLK_HZ;
     config.pixel_format = PIXFORMAT_JPEG;
 
 #ifdef CONFIG_SENTRA_CAM_DEFAULT_QUALITY
@@ -79,16 +108,20 @@ esp_err_t camera_driver_init(void) {
         config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
     }
 
+    bool sccb_locked = lock_sccb_if_shared();
     esp_err_t err = esp_camera_init(&config);
+    if (err == ESP_OK) {
+        sensor_t *s = esp_camera_sensor_get();
+        if (s != NULL) {
+            s->set_vflip(s, 0);
+            s->set_hmirror(s, 0);
+        }
+    }
+    unlock_sccb_if_shared(sccb_locked);
+
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OV2640 Camera init failed (0x%x: %s)", err, esp_err_to_name(err));
         return err;
-    }
-
-    sensor_t *s = esp_camera_sensor_get();
-    if (s != NULL) {
-        s->set_vflip(s, 0);
-        s->set_hmirror(s, 0);
     }
 
     s_cam_initialized = true;
@@ -102,37 +135,56 @@ esp_err_t camera_driver_deinit(void) {
     camera_driver_release(NULL);
     if (!s_cam_initialized) return ESP_OK;
     s_cam_initialized = false;
-    return esp_camera_deinit();
+    bool sccb_locked = lock_sccb_if_shared();
+    esp_err_t err = esp_camera_deinit();
+    unlock_sccb_if_shared(sccb_locked);
+    return err;
 }
 
 bool camera_driver_is_psram_active(void) {
     return s_psram_active;
 }
 
+bool camera_driver_is_ready(void) {
+    return s_cam_initialized;
+}
+
 esp_err_t camera_driver_set_quality(uint8_t jpeg_quality) {
     if (!s_cam_initialized) return ESP_ERR_INVALID_STATE;
+    bool sccb_locked = lock_sccb_if_shared();
     sensor_t *s = esp_camera_sensor_get();
+    int rc = -1;
+    if (s && s->set_quality) {
+        rc = s->set_quality(s, clamp_quality(jpeg_quality));
+    }
+    unlock_sccb_if_shared(sccb_locked);
     if (!s || !s->set_quality) return ESP_ERR_NOT_SUPPORTED;
-    int rc = s->set_quality(s, clamp_quality(jpeg_quality));
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t camera_driver_set_framesize(sentra_cam_framesize_t size) {
     if (!s_cam_initialized) return ESP_ERR_INVALID_STATE;
-    sensor_t *s = esp_camera_sensor_get();
-    if (!s || !s->set_framesize) return ESP_ERR_NOT_SUPPORTED;
     framesize_t target = FRAMESIZE_QVGA;
     if (s_psram_active) {
         if (size == SENTRA_CAM_SIZE_VGA) target = FRAMESIZE_VGA;
         else if (size == SENTRA_CAM_SIZE_SVGA) target = FRAMESIZE_SVGA;
     }
-    int rc = s->set_framesize(s, target);
+    bool sccb_locked = lock_sccb_if_shared();
+    sensor_t *s = esp_camera_sensor_get();
+    int rc = -1;
+    if (s && s->set_framesize) {
+        rc = s->set_framesize(s, target);
+    }
+    unlock_sccb_if_shared(sccb_locked);
+    if (!s || !s->set_framesize) return ESP_ERR_NOT_SUPPORTED;
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t camera_driver_capture(sentra_camera_frame_t *out_frame) {
     if (!out_frame) return ESP_ERR_INVALID_ARG;
     if (!s_cam_initialized) return ESP_ERR_INVALID_STATE;
+
+    if (s_fb_mutex) xSemaphoreTake(s_fb_mutex, portMAX_DELAY);
 
     /* Always release any leaked active framebuffer before grabbing a fresh one. */
     if (s_active_fb != NULL) {
@@ -145,6 +197,7 @@ esp_err_t camera_driver_capture(sentra_camera_frame_t *out_frame) {
         if (fb) esp_camera_fb_return(fb);
         s_consecutive_errors++;
         ESP_LOGE(TAG, "Camera frame capture failed (streak=%u).", (unsigned)s_consecutive_errors);
+        if (s_fb_mutex) xSemaphoreGive(s_fb_mutex);
         if (s_consecutive_errors >= 5) {
             ESP_LOGW(TAG, "Reinitializing OV2640 driver after repeated capture failures...");
             camera_driver_deinit();
@@ -158,6 +211,7 @@ esp_err_t camera_driver_capture(sentra_camera_frame_t *out_frame) {
         ESP_LOGW(TAG, "Discarding corrupt non-JPEG frame buffer.");
         esp_camera_fb_return(fb);
         s_consecutive_errors++;
+        if (s_fb_mutex) xSemaphoreGive(s_fb_mutex);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -169,10 +223,12 @@ esp_err_t camera_driver_capture(sentra_camera_frame_t *out_frame) {
     out_frame->height = fb->height;
     out_frame->timestamp_us = esp_timer_get_time();
 
+    if (s_fb_mutex) xSemaphoreGive(s_fb_mutex);
     return ESP_OK;
 }
 
 void camera_driver_release(sentra_camera_frame_t *frame) {
+    if (s_fb_mutex) xSemaphoreTake(s_fb_mutex, portMAX_DELAY);
     if (s_active_fb) {
         esp_camera_fb_return(s_active_fb);
         s_active_fb = NULL;
@@ -181,6 +237,7 @@ void camera_driver_release(sentra_camera_frame_t *frame) {
         frame->buf = NULL;
         frame->len = 0;
     }
+    if (s_fb_mutex) xSemaphoreGive(s_fb_mutex);
 }
 
 esp_err_t camera_driver_upload_frame(
