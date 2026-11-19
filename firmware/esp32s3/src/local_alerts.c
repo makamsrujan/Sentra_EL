@@ -8,6 +8,7 @@
 #include "sentra_config.h"
 #include "esp_log.h"
 #include <math.h>
+#include <string.h>
 
 static const char *TAG = "LOCAL_ALERTS";
 

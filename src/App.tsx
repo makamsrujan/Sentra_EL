@@ -330,11 +330,15 @@ export default function App() {
     if (turn.spokenResponse) {
       setAssistantResponse(turn.spokenResponse);
     }
-    if (turn.analysis?.goalUpdate) {
-      setCurrentGoal(turn.analysis.goalUpdate);
-    }
     if (turn.analysis?.hazard) {
       setActiveHazard(turn.analysis.hazard);
+    }
+  }, []);
+
+  const handleWearableGoalUpdate = useCallback((update: { deviceId: string; goal: GoalTask | null }) => {
+    if (!settingsRef.current.selectedWearableDeviceId ||
+        update.deviceId === settingsRef.current.selectedWearableDeviceId) {
+      setCurrentGoal(update.goal);
     }
   }, []);
 
@@ -353,6 +357,7 @@ export default function App() {
     selectedDeviceId: settings.selectedWearableDeviceId,
     onAlert: handleTelemetryAlert,
     onVoiceTurn: handleWearableVoiceTurn,
+    onGoalUpdate: handleWearableGoalUpdate,
   });
 
   const activeDeviceRef = useRef(activeDevice);

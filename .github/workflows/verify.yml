@@ -1,0 +1,53 @@
+name: Verify SENTRA code
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  application:
+    name: React and Express
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Simulator-labeled HTTP API smoke
+        env:
+          SENTRA_OPERATOR_TOKEN: ci-local-test-token
+          SENTRA_SIMULATOR_ENABLED: "true"
+          SENTRA_BASE_URL: http://127.0.0.1:3761
+          PORT: "3761"
+        run: |
+          npm run dev > /tmp/sentra-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 25); do
+            if curl --fail --silent http://127.0.0.1:3761/api/health >/dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then cat /tmp/sentra-server.log; exit 1; fi
+          node simulator/esp32_sim.mjs
+
+  esp32s3:
+    name: ESP32-S3 firmware build (not a hardware test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP-IDF firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: release-v5.3
+          target: esp32s3
+          path: firmware/esp32s3

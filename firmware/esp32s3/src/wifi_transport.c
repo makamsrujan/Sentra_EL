@@ -22,6 +22,7 @@ static EventGroupHandle_t s_wifi_event_group = NULL;
 static esp_netif_t *s_sta_netif = NULL;
 static volatile wifi_transport_state_t s_state = WIFI_TRANSPORT_DISCONNECTED;
 static char s_assigned_ip[32] = {0};
+static bool s_credentials_configured = false;
 
 /* Exponential Backoff Parameters */
 static uint32_t s_backoff_delay_ms = 1000;
@@ -38,7 +39,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         ESP_LOGI(TAG, "Wi-Fi Station started, connecting...");
         s_state = WIFI_TRANSPORT_CONNECTING;
-        esp_wifi_connect();
+        if (s_credentials_configured) esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
         s_state = WIFI_TRANSPORT_DISCONNECTED;
         memset(s_assigned_ip, 0, sizeof(s_assigned_ip));
@@ -119,6 +120,7 @@ esp_err_t wifi_transport_connect(const char *ssid, const char *password) {
     esp_err_t ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
     if (ret != ESP_OK) return ret;
 
+    s_credentials_configured = true;
     s_state = WIFI_TRANSPORT_CONNECTING;
     s_backoff_delay_ms = BACKOFF_MIN_DELAY_MS;
     return esp_wifi_connect();
