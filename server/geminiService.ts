@@ -25,7 +25,8 @@ export const SUPPORTED_MODELS = [
   'gemini-4-neon',
 ] as const;
 
-export const DEFAULT_PRIMARY_MODEL = 'gemini-4-hydrogen';
+// Use the established fallback as the default until another model is verified via diagnostics.
+export const DEFAULT_PRIMARY_MODEL = 'gemini-2.5-flash';
 export const FALLBACK_MODEL = 'gemini-2.5-flash';
 const GEMINI_TIMEOUT_MS = 9500;
 
