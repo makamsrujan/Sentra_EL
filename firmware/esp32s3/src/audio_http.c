@@ -10,6 +10,9 @@
 #include "esp_http_client.h"
 #include "cJSON.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
+#include "esp_heap_caps.h"
 
 static const char *TAG = "AUDIO_HTTP";
 
@@ -74,68 +77,85 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
     return err;
 }
 
+/* Download the complete bounded WAV into PSRAM, then play it once.
+   The old code called i2s_audio_play() for EVERY HTTP chunk, which reset
+   DMA and clipped speech at each network boundary. */
 esp_err_t audio_http_fetch_and_play_reply(const char *reply_id) {
-    if (!reply_id || strlen(reply_id) == 0) return ESP_ERR_INVALID_ARG;
+    if (!reply_id || reply_id[0] == 0) return ESP_ERR_INVALID_ARG;
 
-    char url[160];
-    snprintf(url, sizeof(url), "%s/api/device/audio/reply/%s?deviceId=%s",
-             SENTRA_DEFAULT_SERVER_URL, reply_id, SENTRA_DEVICE_ID);
-
-    ESP_LOGI(TAG, "Fetching spoken audio reply from %s...", url);
+    char url[256];
+    int n = snprintf(url, sizeof(url), "%s/api/device/audio/reply/%s?deviceId=%s",
+                     SENTRA_DEFAULT_SERVER_URL, reply_id, SENTRA_DEVICE_ID);
+    if (n < 0 || n >= (int)sizeof(url)) return ESP_ERR_INVALID_SIZE;
 
     esp_http_client_config_t config = {
         .url = url,
         .method = HTTP_METHOD_GET,
-        .timeout_ms = 10000,
+        .timeout_ms = 12000,
         .buffer_size = 2048,
     };
-
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) return ESP_FAIL;
+    if (!client) return ESP_ERR_NO_MEM;
 
     esp_http_client_set_header(client, "X-Device-Id", SENTRA_DEVICE_ID);
     esp_http_client_set_header(client, "X-Device-Token", SENTRA_DEFAULT_DEVICE_TOKEN);
 
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to open HTTP connection: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return err;
-    }
+    esp_err_t result = esp_http_client_open(client, 0);
+    if (result != ESP_OK) goto done;
 
+    /* The service sends Content-Length for generated audio. */
     int content_length = esp_http_client_fetch_headers(client);
-    int status_code = esp_http_client_get_status_code(client);
-
-    if (status_code != 200) {
-        ESP_LOGE(TAG, "Reply fetch failed with HTTP %d", status_code);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_FAIL;
+    int http_status = esp_http_client_get_status_code(client);
+    if (http_status != 200 || content_length < 44 || content_length > (1024 * 1024)) {
+        ESP_LOGE(TAG, "Invalid audio reply: HTTP %d size %d", http_status, content_length);
+        result = ESP_FAIL;
+        goto done;
     }
 
-    ESP_LOGI(TAG, "Streaming audio reply (%d bytes) to I2S...", content_length);
+    uint8_t *wav = (uint8_t *)heap_caps_malloc((size_t)content_length,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wav) {
+        ESP_LOGE(TAG, "Insufficient PSRAM for %d-byte audio reply", content_length);
+        result = ESP_ERR_NO_MEM;
+        goto done;
+    }
 
-    // Stream download chunks directly into I2S playback
-    uint8_t chunk_buf[1024];
-    int read_bytes = 0;
-    bool is_first_chunk = true;
+    size_t received = 0;
+    while (received < (size_t)content_length) {
+        int count = esp_http_client_read(client, (char *)wav + received,
+                                         (int)((size_t)content_length - received));
+        if (count <= 0) break;
+        received += (size_t)count;
+    }
 
-    while ((read_bytes = esp_http_client_read(client, (char *)chunk_buf, sizeof(chunk_buf))) > 0) {
-        size_t offset = 0;
-        // Skip 44-byte WAV header on first chunk
-        if (is_first_chunk && read_bytes >= 44 && memcmp(chunk_buf, "RIFF", 4) == 0) {
-            offset = 44;
-            is_first_chunk = false;
-        }
-
-        if (read_bytes > offset) {
-            i2s_audio_play(chunk_buf + offset, read_bytes - offset, SENTRA_AUDIO_PLAY_SAMPLE_RATE);
+    if (received != (size_t)content_length ||
+        memcmp(wav, "RIFF", 4) != 0 || memcmp(wav + 8, "WAVE", 4) != 0 ||
+        memcmp(wav + 12, "fmt ", 4) != 0 ||
+        wav[20] != 1 || wav[21] != 0 || wav[22] != 1 || wav[23] != 0 ||
+        wav[34] != 16 || wav[35] != 0 ||
+        memcmp(wav + 36, "data", 4) != 0) {
+        ESP_LOGE(TAG, "Downloaded speech is incomplete or is not mono PCM16 WAV");
+        result = ESP_ERR_INVALID_RESPONSE;
+    } else {
+        uint32_t rate = ((uint32_t)wav[24]) | ((uint32_t)wav[25] << 8) |
+                        ((uint32_t)wav[26] << 16) | ((uint32_t)wav[27] << 24);
+        uint32_t data_size = ((uint32_t)wav[40]) | ((uint32_t)wav[41] << 8) |
+                             ((uint32_t)wav[42] << 16) | ((uint32_t)wav[43] << 24);
+        if ((rate != 24000 && rate != 16000) || data_size != received - 44) {
+            ESP_LOGE(TAG, "Unexpected WAV rate/data length: %lu Hz, %lu bytes",
+                     (unsigned long)rate, (unsigned long)data_size);
+            result = ESP_ERR_INVALID_RESPONSE;
+        } else {
+            result = i2s_audio_play(wav, received, rate);
         }
     }
 
+    heap_caps_free(wav);
+
+done:
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
-    return ESP_OK;
+    return result;
 }
 
 esp_err_t audio_http_poll_and_execute_actions(void) {
