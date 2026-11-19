@@ -28,6 +28,7 @@
 #include "wifi_transport.h"
 #include "camera_driver.h"
 #include "device_telemetry.h"
+#include "mpu6050.h"
 
 static const char *TAG = "SENTRA_MAIN";
 
@@ -217,6 +218,14 @@ void app_main(void) {
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C initialization failed: %s", esp_err_to_name(ret));
     }
+
+    bool imu_ready = false;
+    if (ret == ESP_OK) {
+        esp_err_t imu_status = sentra_mpu6050_init(I2C_NUM_0);
+        imu_ready = (imu_status == ESP_OK);
+        if (!imu_ready) ESP_LOGW(TAG, "MPU6050 unavailable: %s", esp_err_to_name(imu_status));
+    }
+    sentra_telemetry_set_imu_initialized(imu_ready);
 
     // 2. Initialize Waveshare WM8960 Audio Codec
     ret = wm8960_init(I2C_NUM_0);
