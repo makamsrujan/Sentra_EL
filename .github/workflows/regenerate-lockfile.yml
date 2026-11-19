@@ -19,7 +19,7 @@ jobs:
         with:
           node-version: '24.12.0'
       - name: Generate npm lockfile from required application dependencies
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+        run: npm install --ignore-scripts --no-audit --no-fund
       - name: Commit updated lockfile to fix branch
         run: |
           if git diff --quiet -- package-lock.json; then
