@@ -79,6 +79,8 @@ export function useCamera({
       setResolution(null);
       setHasTorch(false);
       setIsTorchOn(false);
+      setErrorType(null);
+      setErrorMessage(null);
     }
   }, [clearVideoElement]);
 
