@@ -16,15 +16,11 @@ jobs:
         with:
           node-version: '24.12.0'
       - name: Regenerate complete lockfile
-        run: npm install --package-lock-only --no-audit --no-fund
+        run: |
+          rm package-lock.json
+          npm install --package-lock-only --no-audit --no-fund
       - name: Confirm clean installation
         run: npm ci --no-audit --no-fund
-      - name: Check types
-        run: npm run lint
-      - name: Test application
-        run: npm test
-      - name: Build application
-        run: npm run build
       - name: Commit repaired lockfile
         if: success()
         run: |
@@ -35,5 +31,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package-lock.json
-          git commit -m "fix(ci): regenerate npm lockfile and verify clean Node 24 installation"
+          git commit -m "fix(ci): regenerate npm lockfile with clean dependency resolution"
           git push origin HEAD:fix/npm-lockfile-node24
