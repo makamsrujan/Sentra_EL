@@ -13,12 +13,12 @@ device. The previous README overstated the implementation status.
 - OV2640 JPEG camera capture and authenticated binary frame uploads
   (opt-in; firmware pinout has NOT been physically verified).
 - Periodic authenticated telemetry to existing `/api/device/telemetry`.
-  Sensor fields are intentionally null until real drivers are integrated.
+  ToF/battery fields are intentionally null; MPU6050 data is emitted only after successful initialization and live reading.
 
 ## Not yet implemented or demonstrated
 
 - Two functional VL53L0X ranging drivers and XSHUT address assignment.
-- Actual MPU6050 measurements and INA219 power telemetry.
+- Real MPU6050 register reading is integrated into telemetry, but has not been\n  checked on silicon. INA219 power sensing remains unimplemented.
 - Hardware-independent sensor alerts from confirmed physical readings.
 - Real always-listening / hands-free "Hey SENTRA" wake-word recognition;
   button-triggered WAV is the currently compiled firmware path.

@@ -7,7 +7,7 @@ The project combines camera-based visual analysis, proximity-sensor telemetry, n
 
 **UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE**
 
-> **Prototype status:** This repository contains the React/TypeScript companion application and its Node/Express backend. Browser-camera, voice, Gemini, telemetry, wearable JPEG viewing, memory, and analytics code paths are present. Their behavior still requires browser, server, and end-to-end testing. **ESP32-S3 firmware source is included, but ToF sensor acquisition, MPU6050 integration, independent embedded wake-word detection and physically verified navigation are incomplete or unverified.**
+> **Prototype status:** This repository contains the React/TypeScript companion application and its Node/Express backend. Browser-camera, voice, Gemini, telemetry, wearable JPEG viewing, memory, and analytics code paths are present. Their behavior still requires browser, server, and end-to-end testing. **ESP32-S3 firmware source is included, but ToF sensor acquisition, physical MPU6050 validation, independent embedded wake-word detection and physically verified navigation are incomplete or unverified.**
 
 > **Safety:** SENTRA is an experimental aid, **not** a certified mobility or obstacle-avoidance device. It must not be used as the sole basis for walking, crossing roads, or avoiding hazards. An absence of detected obstacles is **not** confirmation of a safe path.
 
