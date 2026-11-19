@@ -66,10 +66,10 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn, onG
     try {
       const data = await fetchDeviceStatus(selectedDeviceRef.current || undefined);
       setDevices(data.devices || []);
-      const match =
-        data.devices?.find((d) => d.deviceId === selectedDeviceRef.current) ||
-        data.telemetry ||
-        null;
+      // Never fall back to another device when a specific wearable is selected.
+      const match = selectedDeviceRef.current
+        ? data.devices?.find((d) => d.deviceId === selectedDeviceRef.current) || null
+        : data.telemetry || data.devices?.[0] || null;
       setActiveDevice(match);
       setTelemetryError(null);
     } catch (err: any) {
@@ -135,10 +135,9 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn, onG
           const parsed = JSON.parse(ev.data);
           if (Array.isArray(parsed.devices)) {
             setDevices(parsed.devices);
-            const match =
-              parsed.devices.find((d: DeviceLiveState) => d.deviceId === selectedDeviceRef.current) ||
-              parsed.telemetry ||
-              null;
+            const match = selectedDeviceRef.current
+              ? parsed.devices.find((d: DeviceLiveState) => d.deviceId === selectedDeviceRef.current) || null
+              : parsed.telemetry || parsed.devices[0] || null;
             setActiveDevice(match);
           }
         } catch {}

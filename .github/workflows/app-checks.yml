@@ -1,0 +1,34 @@
+name: SENTRA app checks
+
+on:
+  push:
+    branches: [main, "sentra/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: TypeScript, tests and production build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Type-check
+        run: npm run lint
+      - name: Run unit and integration tests
+        run: npm test
+        env:
+          GEMINI_API_KEY: ''
+          SENTRA_SIMULATOR_ENABLED: 'true'
+      - name: Build application
+        run: npm run build
