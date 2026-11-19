@@ -19,7 +19,31 @@ export const CapabilitiesSchema = z.object({
   downwardToF: z.boolean().default(false),
   imu: z.boolean().default(false),
   audioOutput: z.boolean().default(false),
+  vl53l5cx: z.boolean().optional().default(false),
 });
+
+export const SensorReadingStatusSchema = z.enum(['valid', 'invalid', 'stale', 'unavailable']);
+
+export const SensorHealthPartialSchema = z
+  .object({
+    forwardToF: SensorReadingStatusSchema.optional(),
+    downwardToF: SensorReadingStatusSchema.optional(),
+    imu: SensorReadingStatusSchema.optional(),
+    imuCalibrated: z.boolean().optional(),
+    camera: SensorReadingStatusSchema.optional(),
+    vl53l5cx: SensorReadingStatusSchema.optional(),
+    wm8960: SensorReadingStatusSchema.optional(),
+  })
+  .optional();
+
+export const Vl53l5cxZoneSchema = z
+  .object({
+    available: z.boolean(),
+    validZones: z.number().int().min(0).max(64),
+    minDistanceMm: finiteNullableNumber(0, 6000).transform((v) => v ?? null),
+  })
+  .nullable()
+  .optional();
 
 export const ImuSchema = z.object({
   ax: z.number().finite().min(-100).max(100),
@@ -29,6 +53,8 @@ export const ImuSchema = z.object({
   gy: z.number().finite().min(-2000).max(2000),
   gz: z.number().finite().min(-2000).max(2000),
   heading: z.number().finite().min(0).max(360).nullable(),
+  calibrated: z.boolean().optional(),
+  motionMagnitude: finiteNullableNumber(0, 100),
 });
 
 export const TelemetryPayloadV1Schema = z.object({
@@ -41,6 +67,7 @@ export const TelemetryPayloadV1Schema = z.object({
     .regex(/^[a-zA-Z0-9._-]+$/),
   sequence: z.number().int().min(0),
   uptimeMs: z.number().finite().min(0).max(365 * 24 * 3600 * 1000),
+  firmwareVersion: z.string().trim().max(48).nullable().optional(),
   batteryPercent: finiteNullableNumber(0, 100),
   batteryCharging: z.boolean().nullable().optional(),
   earphoneConnected: z.boolean().nullable().optional(),
@@ -51,7 +78,10 @@ export const TelemetryPayloadV1Schema = z.object({
     downwardDistanceMm: finiteNullableNumber(0, 5000),
     headPitchDeg: finiteNullableNumber(-90, 90),
     imu: ImuSchema.nullable(),
+    vl53l5cx: Vl53l5cxZoneSchema,
   }),
+  sensorHealth: SensorHealthPartialSchema,
+  diagnostics: z.string().max(400).nullable().optional(),
   capabilities: CapabilitiesSchema,
 });
 
@@ -135,6 +165,7 @@ export function parseAndAdaptTelemetry(
     const downwardMm = d.capabilities.downwardToF
       ? sanitizeDistanceReading(d.sensors.downwardDistanceMm, 10, 2000)
       : null;
+    const vl53l5cxReading = d.capabilities.vl53l5cx ? (d.sensors.vl53l5cx ?? null) : null;
 
     return {
       ok: true,
@@ -144,6 +175,7 @@ export function parseAndAdaptTelemetry(
         deviceId: d.deviceId,
         sequence: d.sequence,
         uptimeMs: d.uptimeMs,
+        firmwareVersion: d.firmwareVersion ?? null,
         batteryPercent: d.batteryPercent ?? null,
         batteryCharging: d.batteryCharging ?? null,
         earphoneConnected: d.capabilities.audioOutput ? (d.earphoneConnected ?? null) : null,
@@ -153,7 +185,10 @@ export function parseAndAdaptTelemetry(
           downwardDistanceMm: downwardMm,
           headPitchDeg: d.sensors.headPitchDeg ?? null,
           imu: d.capabilities.imu ? d.sensors.imu : null,
+          vl53l5cx: vl53l5cxReading,
         },
+        sensorHealth: d.sensorHealth,
+        diagnostics: d.diagnostics ?? null,
         capabilities: d.capabilities,
       },
     };
@@ -181,6 +216,7 @@ export function parseAndAdaptTelemetry(
       deviceId: l.deviceId || defaultDeviceId,
       sequence: l.sequence ?? fallbackSequence,
       uptimeMs: l.uptimeMs ?? 0,
+      firmwareVersion: null,
       batteryPercent: l.batteryLevel ?? null,
       batteryCharging: l.batteryCharging ?? null,
       earphoneConnected: l.earphoneConnected ?? null,
@@ -195,6 +231,7 @@ export function parseAndAdaptTelemetry(
               heading: l.imu.heading ?? null,
             }
           : null,
+        vl53l5cx: null,
       },
       capabilities: {
         camera: false,
@@ -202,6 +239,7 @@ export function parseAndAdaptTelemetry(
         downwardToF: downwardMm !== null,
         imu: hasImu,
         audioOutput: l.earphoneConnected !== undefined && l.earphoneConnected !== null,
+        vl53l5cx: false,
       },
     },
   };
@@ -221,7 +259,35 @@ export const DeviceRegistrationSchema = z.object({
     downwardToF: false,
     imu: false,
     audioOutput: false,
+    vl53l5cx: false,
   }),
+});
+
+export const DeviceConfigUpdateSchema = z.object({
+  deviceId: z.string().trim().min(2).max(64).default('ESP32-S3-SENTRA-001'),
+  tofSampleIntervalMs: z.number().int().min(50).max(5000).optional(),
+  imuSampleIntervalMs: z.number().int().min(20).max(5000).optional(),
+  frameUploadIntervalMs: z.number().int().min(250).max(30000).optional(),
+  jpegQuality: z.number().int().min(4).max(63).optional(),
+  frameSize: z.enum(['QVGA', 'VGA', 'SVGA']).optional(),
+  proximityCautionCm: z.number().finite().min(25).max(300).optional(),
+  proximityCriticalCm: z.number().finite().min(10).max(150).optional(),
+  sensorStaleMs: z.number().int().min(1000).max(60000).optional(),
+  alertCooldownMs: z.number().int().min(1000).max(60000).optional(),
+});
+
+export const DeviceCommandSchema = z.object({
+  deviceId: z.string().trim().min(2).max(64),
+  command: z.enum([
+    'CAPTURE_FRAME',
+    'REQUEST_OBSERVATION',
+    'RECALIBRATE_IMU',
+    'CONFIG_UPDATE',
+    'SPEAK_ALERT',
+  ]),
+  text: z.string().trim().max(300).optional(),
+  priority: z.enum(['normal', 'critical']).default('normal'),
+  payload: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const AckActionsSchema = z.object({

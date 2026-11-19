@@ -1,8 +1,11 @@
 import type {
   AnalyticsSummary,
   DeviceCapabilities,
+  DeviceCommandType,
   DeviceLiveState,
+  DeviceRuntimeConfig,
   SensorEventRecord,
+  SensorFusionSummary,
   WearableFrameStatus,
 } from '../types/deviceProtocol';
 import type {
@@ -34,6 +37,8 @@ export async function fetchDeviceStatus(deviceId?: string): Promise<{
   telemetry: DeviceLiveState | null;
   devices: DeviceLiveState[];
   pendingActionsCount: number;
+  deviceConfig?: DeviceRuntimeConfig;
+  sensorFusion?: SensorFusionSummary | null;
 }> {
   const url = deviceId
     ? `/api/device/status?deviceId=${encodeURIComponent(deviceId)}`
@@ -41,6 +46,82 @@ export async function fetchDeviceStatus(deviceId?: string): Promise<{
   const res = await fetch(url, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Device status failed (${res.status})`);
   return res.json();
+}
+
+export async function fetchDeviceConfig(deviceId: string): Promise<{
+  ok: boolean;
+  deviceId: string;
+  config: DeviceRuntimeConfig;
+}> {
+  const res = await fetch(`/api/device/config?deviceId=${encodeURIComponent(deviceId)}`, {
+    cache: 'no-store',
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Device config fetch failed (${res.status})`);
+  return data;
+}
+
+export async function updateDeviceConfig(params: {
+  deviceId: string;
+  config: Partial<DeviceRuntimeConfig>;
+  operatorToken?: string;
+}): Promise<{ ok: boolean; deviceId: string; config: DeviceRuntimeConfig; queuedActionId?: string }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (params.operatorToken?.trim()) {
+    headers['X-Operator-Token'] = params.operatorToken.trim();
+  }
+  const res = await fetch('/api/device/config', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ deviceId: params.deviceId, ...params.config }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Config update failed (${res.status})`);
+  return data;
+}
+
+export async function sendDeviceCommand(params: {
+  deviceId: string;
+  type: DeviceCommandType;
+  text?: string;
+  payload?: Record<string, unknown>;
+  operatorToken?: string;
+}): Promise<{ ok: boolean; deviceId: string; action: { id: string; type: string } }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (params.operatorToken?.trim()) {
+    headers['X-Operator-Token'] = params.operatorToken.trim();
+  }
+  const res = await fetch('/api/device/command', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      deviceId: params.deviceId,
+      command: params.type,
+      text: params.text,
+      payload: params.payload,
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Device command failed (${res.status})`);
+  return data;
+}
+
+export async function updateAudioOwnership(
+  mode: 'browser' | 'wearable' | 'test',
+  operatorToken?: string
+): Promise<{ ok: boolean; audioOwnership: 'browser' | 'wearable' | 'test' }> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (operatorToken?.trim()) {
+    headers['X-Operator-Token'] = operatorToken.trim();
+  }
+  const res = await fetch('/api/device/audio/ownership', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `Audio ownership update failed (${res.status})`);
+  return data;
 }
 
 export async function fetchFrameStatus(deviceId: string, signal?: AbortSignal): Promise<WearableFrameStatus> {
@@ -118,6 +199,8 @@ export async function sendSimulatedTelemetry(
       gy: number;
       gz: number;
       heading: number | null;
+      calibrated?: boolean;
+      motionMagnitude?: number;
     } | null;
   },
   operatorToken?: string
@@ -242,25 +325,29 @@ export async function clearAllMemories(): Promise<void> {
   if (!res.ok) throw new Error(`Clear memories failed (${res.status})`);
 }
 
-export async function analyzeSentraObservation(body: {
-  mode: SentraMode;
-  operation?: SentraOperation;
-  query: string;
-  image: string | null;
-  imageTimestamp: number | null;
-  imageDimensions: { width: number; height: number } | null;
-  sensors: string;
-  goal: string | null;
-  memory: SentraMemoryItem[];
-  history: Array<{ role: 'user' | 'assistant'; text: string }>;
-  heading: number | null;
-  useWearableFrame: boolean;
-  wearableDeviceId?: string;
-}): Promise<AnalysisResponseData> {
+export async function analyzeSentraObservation(
+  body: {
+    mode: SentraMode;
+    operation?: SentraOperation;
+    query: string;
+    image: string | null;
+    imageTimestamp: number | null;
+    imageDimensions: { width: number; height: number } | null;
+    sensors: string;
+    goal: string | null;
+    memory: SentraMemoryItem[];
+    history: Array<{ role: 'user' | 'assistant'; text: string }>;
+    heading: number | null;
+    useWearableFrame: boolean;
+    wearableDeviceId?: string;
+  },
+  signal?: AbortSignal
+): Promise<AnalysisResponseData> {
   const res = await fetch('/api/sentra/analyze', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal,
   });
   return res.json();
 }

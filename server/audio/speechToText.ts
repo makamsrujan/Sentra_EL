@@ -106,10 +106,17 @@ export async function transcribeWavAudio(
     options?.model ||
     process.env.GEMINI_STT_MODEL ||
     process.env.GEMINI_MODEL ||
-    'gemini-2.5-flash';
+    'gemini-3.5-transcribe';
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
     const base64Audio = buffer.toString('base64');
 
     const response = await ai.models.generateContent({

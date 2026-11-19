@@ -579,4 +579,110 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
     fastStore.close();
     fs.rmSync(fastTmp, { recursive: true, force: true });
   });
+
+  it('defaults to gemini-3.8-flash, auto-upgrades retired gemini-2.5-flash, normalizes models/ prefix, and rejects stale browser snapshots', async () => {
+    delete process.env.SENTRA_GEMINI_MODEL;
+    delete process.env.GEMINI_API_KEY;
+    expect(validateConfiguredModel()).toMatchObject({
+      valid: true,
+      configuredModel: 'gemini-3.8-flash',
+    });
+
+    process.env.SENTRA_GEMINI_MODEL = 'gemini-2.5-flash';
+    expect(validateConfiguredModel()).toMatchObject({
+      valid: true,
+      rawConfiguredModel: 'gemini-2.5-flash',
+      configuredModel: 'gemini-3.8-flash',
+    });
+    process.env.SENTRA_GEMINI_MODEL = 'models/gemini-4-hydrogen';
+    expect(validateConfiguredModel()).toMatchObject({
+      valid: true,
+      configuredModel: 'gemini-4-hydrogen',
+    });
+    delete process.env.SENTRA_GEMINI_MODEL;
+
+    // Stale browser snapshot (>20s old) must be rejected with NO_FRESH_IMAGE
+    const staleDataUrl = `data:image/jpeg;base64,${VALID_JPEG_HEADER.toString('base64')}`;
+    const staleRes = await fetch(`${baseUrl}/api/sentra/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'describe',
+        operation: 'scene_analysis',
+        query: 'What is in front of me?',
+        image: staleDataUrl,
+        imageTimestamp: Date.now() - 35000,
+        wearableDeviceId: 'UNCONNECTED-DEVICE',
+      }),
+    });
+    const staleJson = await staleRes.json();
+    expect(staleJson.status).toBe('degraded');
+    expect(staleJson.errorCode).toBe('NO_FRESH_IMAGE');
+  });
+
+  it('supports runtime device config updates and remote command queue polling + ack', async () => {
+    // Requires operator auth for config & command endpoints
+    const unauthCfg = await fetch(`${baseUrl}/api/device/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, frameSize: 'QVGA' }),
+    });
+    expect(unauthCfg.status).toBe(401);
+
+    const cfgUpdateRes = await fetch(`${baseUrl}/api/device/config`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Operator-Token': testOperatorToken,
+      },
+      body: JSON.stringify({
+        deviceId,
+        frameSize: 'QVGA',
+        jpegQuality: 15,
+        proximityCriticalCm: 55,
+      }),
+    });
+    expect(cfgUpdateRes.status).toBe(200);
+    const cfgUpdateJson = await cfgUpdateRes.json();
+    expect(cfgUpdateJson.config.frameSize).toBe('QVGA');
+    expect(cfgUpdateJson.config.proximityCriticalCm).toBe(55);
+
+    const cmdRes = await fetch(`${baseUrl}/api/device/command`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Operator-Token': testOperatorToken,
+      },
+      body: JSON.stringify({ deviceId, command: 'RECALIBRATE_IMU' }),
+    });
+    expect(cmdRes.status).toBe(200);
+    const cmdJson = await cmdRes.json();
+    expect(cmdJson.action.type).toBe('recalibrate_imu');
+
+    const pollRes = await fetch(`${baseUrl}/api/device/poll?deviceId=${deviceId}`, {
+      headers: { Authorization: `Bearer ${provisionedToken}` },
+    });
+    expect(pollRes.status).toBe(200);
+    const pollJson = await pollRes.json();
+    expect(pollJson.config.frameSize).toBe('QVGA');
+    expect(pollJson.actions.some((a: any) => a.type === 'config_update')).toBe(true);
+    expect(pollJson.actions.some((a: any) => a.type === 'recalibrate_imu')).toBe(true);
+
+    const ackIds = pollJson.actions.map((a: any) => a.id);
+    const ackRes = await fetch(`${baseUrl}/api/device/ack`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${provisionedToken}`,
+      },
+      body: JSON.stringify({ deviceId, actionIds: ackIds }),
+    });
+    expect(ackRes.status).toBe(200);
+
+    // Status exposes deviceConfig + sensorFusion truthfully without downward drop-off on baseline
+    const statusRes = await fetch(`${baseUrl}/api/device/status?deviceId=${deviceId}`);
+    const statusJson = await statusRes.json();
+    expect(statusJson.deviceConfig.proximityCriticalCm).toBe(55);
+    expect(statusJson.sensorFusion).toBeTruthy();
+  });
 });

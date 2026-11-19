@@ -358,12 +358,21 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
       expect(json.codec.name).toContain('Waveshare WM8960');
       expect(json.codec.sampleRate).toBe(16000);
       expect(json.ownershipMode).toBe('wearable');
+      expect(json.sttModel).toBe('gemini-3.5-transcribe');
+      expect(json.ttsModel).toBe('gemini-3.8-flash-lite-tts');
       // Verify no tokens leaked in JSON
       const jsonStr = JSON.stringify(json);
       expect(jsonStr).not.toContain('sentra-dev-key');
       expect(jsonStr).not.toContain('testOperator');
 
       server.close();
+    });
+
+    it('validates 24 kHz TTS WAV output without failing default 16 kHz sample rate check', () => {
+      const ttsWav = synthesizeTestToneWav(200, 24000);
+      const valid24k = validateWavBuffer(ttsWav, { expectedSampleRate: 24000 });
+      expect(valid24k.valid).toBe(true);
+      expect(valid24k.sampleRate).toBe(24000);
     });
   });
 });

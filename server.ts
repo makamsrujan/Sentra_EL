@@ -1,5 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
@@ -7,6 +8,7 @@ import { SentraEventStore } from './server/eventStore';
 import { DeviceGateway } from './server/deviceGateway';
 import { AudioReplyStore } from './server/audio/audioReplyStore';
 import { processWearableVoiceTurn } from './server/audio/voiceTurnService';
+import { attachLiveVoiceWebSocket, resolveLiveModelName } from './server/liveVoiceGateway';
 import {
   getConfiguredModel,
   getLastWorkingModel,
@@ -20,6 +22,8 @@ import {
   AckActionsSchema,
   AnalyzeRequestSchema,
   decodeBase64Image,
+  DeviceCommandSchema,
+  DeviceConfigUpdateSchema,
   DeviceRegistrationSchema,
   MAX_AUDIO_UPLOAD_BYTES,
   MAX_FRAME_BYTES,
@@ -28,6 +32,7 @@ import {
   validateJpegBuffer,
   validateWavBuffer,
 } from './server/validation';
+import { evaluateSensorFusion } from './src/utils/sensorFusion';
 
 dotenv.config();
 
@@ -135,6 +140,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       modelConfigValid: modelValidation.valid,
       modelConfigError: modelValidation.errorMessage,
       supportedModels: [...SUPPORTED_MODELS],
+      liveModel: resolveLiveModelName(),
       lastWorkingModel: getLastWorkingModel(),
       operatorAuthConfigured: Boolean(process.env.SENTRA_OPERATOR_TOKEN?.trim()),
       simulatorEnabled: gateway.isSimulatorEnabled(),
@@ -160,12 +166,66 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
     const telemetry = gateway.getLiveState(deviceId);
     const devices = gateway.listLiveStates();
+    const deviceConfig = gateway.getDeviceConfig(deviceId);
+    const sensorFusion = evaluateSensorFusion(telemetry);
     res.json({
       ok: true,
       telemetry,
       devices,
+      deviceConfig,
+      sensorFusion,
       pendingActionsCount: telemetry?.pendingActionsCount ?? 0,
     });
+  });
+
+  app.get('/api/device/config', (req, res) => {
+    const deviceId = typeof req.query.deviceId === 'string' ? req.query.deviceId : undefined;
+    return res.json({
+      ok: true,
+      deviceId: deviceId || gateway.getLiveState()?.deviceId || 'ESP32-S3-SENTRA-001',
+      config: gateway.getDeviceConfig(deviceId),
+    });
+  });
+
+  app.post('/api/device/config', (req, res) => {
+    const opAuth = requireOperatorAuth(req);
+    if (!opAuth.ok) {
+      return res.status(opAuth.status).json({ ok: false, error: opAuth.error });
+    }
+    const parsed = DeviceConfigUpdateSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        ok: false,
+        error: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      });
+    }
+    const { deviceId, ...patch } = parsed.data;
+    const updated = gateway.updateDeviceConfig(deviceId, patch);
+    return res.json({
+      ok: updated.ok,
+      deviceId,
+      config: updated.config,
+      queuedActionId: updated.action?.id ?? null,
+    });
+  });
+
+  app.post('/api/device/command', (req, res) => {
+    const opAuth = requireOperatorAuth(req);
+    if (!opAuth.ok) {
+      return res.status(opAuth.status).json({ ok: false, error: opAuth.error });
+    }
+    const parsed = DeviceCommandSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        ok: false,
+        error: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      });
+    }
+    const action = gateway.enqueueCommand(parsed.data);
+    if (!action) {
+      return res.status(404).json({ ok: false, error: `Device "${parsed.data.deviceId}" is not registered.` });
+    }
+    return res.json({ ok: true, deviceId: parsed.data.deviceId, action });
   });
 
   app.get('/api/device/stream', (req, res) => {
@@ -382,7 +442,8 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       return res.status(401).json({ ok: false, error: 'Unauthorized device poll.' });
     }
     const actions = gateway.pollPendingActions(deviceId);
-    return res.json({ ok: true, deviceId, actions });
+    const config = gateway.getDeviceConfig(deviceId);
+    return res.json({ ok: true, deviceId, actions, config });
   });
 
   app.post('/api/device/ack', (req, res) => {
@@ -567,9 +628,9 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
         channels: 1,
       },
       sttConfigured: isGeminiApiKeyConfigured(),
-      sttModel: process.env.GEMINI_STT_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      sttModel: process.env.GEMINI_STT_MODEL || process.env.GEMINI_MODEL || 'gemini-3.5-transcribe',
       ttsConfigured: isGeminiApiKeyConfigured(),
-      ttsModel: process.env.GEMINI_TTS_MODEL || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+      ttsModel: process.env.GEMINI_TTS_MODEL || process.env.GEMINI_MODEL || 'gemini-3.8-flash-lite-tts',
       activeRepliesCount: audioReplyStore.size(),
       lastTurnLatencyMs: null,
       lastTurnStatus: 'standby',
@@ -612,11 +673,16 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     const current = gateway.getLiveState(simId);
     const nextSeq = current?.lastSequence != null ? current.lastSequence + 1 : 1;
 
+    const hasDownwardSample =
+      req.body?.downwardToF === true ||
+      req.body?.downwardDistanceMm !== undefined ||
+      req.body?.downwardCliffSensorMm !== undefined;
     const rawBody = {
       schemaVersion: 1,
       deviceId: simId,
       sequence: nextSeq,
       uptimeMs: (current?.uptimeMs ?? 0) + 1000,
+      firmwareVersion: req.body?.firmwareVersion ?? 'sim-1.1.0',
       batteryPercent:
         req.body?.batteryPercent !== undefined
           ? req.body.batteryPercent
@@ -633,21 +699,29 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
             : req.body?.forwardToFDistanceCm !== undefined
             ? req.body.forwardToFDistanceCm
             : current?.sensors.forwardDistanceCm ?? 150,
-        downwardDistanceMm:
-          req.body?.downwardDistanceMm !== undefined
-            ? req.body.downwardDistanceMm
-            : req.body?.downwardCliffSensorMm !== undefined
-            ? req.body.downwardCliffSensorMm
-            : current?.sensors.downwardDistanceMm ?? 85,
+        downwardDistanceMm: hasDownwardSample
+          ? req.body?.downwardDistanceMm ?? req.body?.downwardCliffSensorMm ?? null
+          : null,
         headPitchDeg: req.body?.headPitchDeg ?? 0,
-        imu: req.body?.imu ?? current?.sensors.imu ?? null,
+        imu: req.body?.imu ?? current?.sensors.imu ?? {
+          ax: 0.02,
+          ay: -0.01,
+          az: 9.81,
+          gx: 0.1,
+          gy: -0.2,
+          gz: 0.05,
+          heading: null,
+          calibrated: true,
+        },
+        vl53l5cx: req.body?.vl53l5cx ?? null,
       },
       capabilities: {
         camera: true,
         forwardToF: true,
-        downwardToF: true,
-        imu: Boolean(req.body?.imu ?? current?.sensors.imu),
+        downwardToF: hasDownwardSample,
+        imu: true,
         audioOutput: false,
+        vl53l5cx: Boolean(req.body?.vl53l5cx?.available),
       },
     };
 
@@ -819,7 +893,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
 }
 
 async function startServer() {
-  const { app, gateway } = createSentraApp();
+  const { app, gateway, store } = createSentraApp();
   gateway.startHeartbeatMonitor();
 
   if (process.env.NODE_ENV === 'production') {
@@ -861,7 +935,10 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = http.createServer(app);
+  attachLiveVoiceWebSocket({ server: httpServer, gateway, store });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`SENTRA server listening on http://0.0.0.0:${PORT}`);
   });
 }

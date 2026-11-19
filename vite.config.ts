@@ -48,6 +48,7 @@ export default defineConfig(() => {
         workbox: {
           // Cache only static UI shell resources; never cache live camera frames, telemetry, or Gemini API calls
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
+          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           navigateFallbackDenylist: [/^\/api\//],
           runtimeCaching: [
             {

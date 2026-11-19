@@ -154,6 +154,7 @@ export function classifySpeechError(
     isSecureContext: boolean;
     isEmbedded: boolean;
     permissionsPolicyBlocked: boolean;
+    isOnline?: boolean;
   } = { isSecureContext: true, isEmbedded: false, permissionsPolicyBlocked: false }
 ): { type: VoiceErrorType; message: string; fatalForLoop: boolean } {
   const code = (errorCode || '').toLowerCase();
@@ -204,9 +205,14 @@ export function classifySpeechError(
   }
 
   if (code === 'network') {
+    const offline =
+      env.isOnline === false ||
+      (typeof navigator !== 'undefined' && navigator.onLine === false);
     return {
       type: 'network',
-      message: 'Speech recognition requires network connectivity to the browser speech service.',
+      message: offline
+        ? 'Browser appears offline. Speech recognition needs network connectivity; typed input remains available.'
+        : 'Speech recognition requires network connectivity to the browser speech service.',
       fatalForLoop: true,
     };
   }

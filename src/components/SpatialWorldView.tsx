@@ -367,7 +367,9 @@ export const SpatialWorldView: React.FC<SpatialWorldViewProps> = ({
           <div className="font-mono text-base font-extrabold text-primary tabular-nums">
             {hasHeading ? `${currentHeading}° ${compassDir}` : 'Heading N/A'}
           </div>
-          <div className="text-[11px] text-muted-foreground font-mono">Compass Bearing</div>
+          <div className="text-[11px] text-muted-foreground font-mono">
+            {hasHeading ? 'Browser Magnetometer' : 'MPU6050 6-axis: No Compass'}
+          </div>
         </div>
       </div>
 

@@ -1,12 +1,14 @@
 /**
  * @file main.c
- * @brief SENTRA ESP32-S3 Wearable Firmware Main Application Entry Point
+ * @brief SENTRA ESP32-S3 N16R8 Wearable Firmware Main Entry Point
  *
- * Implements the deterministic state machine:
- * STANDBY -> RECORDING -> TRANSCRIBING -> REASONING -> SPEECH_GENERATION -> PLAYBACK -> STANDBY
- * (plus ERROR, CANCELLED, DISCONNECTED)
- *
- * Supports autonomous local obstacle/cliff warnings via WM8960 DAC even when offline.
+ * Baseline Hardware:
+ *   - 1 x OV2640 Camera (headband)
+ *   - 1 x VL53L0X Forward ToF (headband)
+ *   - 1 x GY-521 MPU6050 IMU (headband)
+ * Optional Modules (Kconfig disabled by default):
+ *   - Waveshare WM8960 Audio Codec (CONFIG_SENTRA_ENABLE_WM8960)
+ *   - VL53L5CX Depth Sensor (CONFIG_SENTRA_ENABLE_VL53L5CX)
  */
 
 #include <stdio.h>
@@ -16,11 +18,17 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
 
 #include "sentra_config.h"
+#include "sentra_nvs_config.h"
+#include "i2c_bus.h"
+#include "vl53l0x.h"
+#include "vl53l5cx_optional.h"
+#include "mpu6050.h"
 #include "wm8960.h"
 #include "i2s_audio.h"
 #include "local_alerts.h"
@@ -28,52 +36,42 @@
 #include "wifi_transport.h"
 #include "camera_driver.h"
 #include "device_telemetry.h"
-#include "mpu6050.h"
 
 static const char *TAG = "SENTRA_MAIN";
 
 static volatile sentra_audio_state_t s_current_state = SENTRA_AUDIO_STATE_STANDBY;
 static uint32_t s_audio_sequence = 1;
+static bool s_camera_ready = false;
+static bool s_forward_tof_ready = false;
+static bool s_imu_ready = false;
+static bool s_wm8960_ready = false;
 
 const char* sentra_audio_state_to_string(sentra_audio_state_t state) {
     switch (state) {
-        case SENTRA_AUDIO_STATE_STANDBY:            return "STANDBY";
-        case SENTRA_AUDIO_STATE_RECORDING:          return "RECORDING";
-        case SENTRA_AUDIO_STATE_TRANSCRIBING:        return "TRANSCRIBING";
-        case SENTRA_AUDIO_STATE_REASONING:          return "REASONING";
-        case SENTRA_AUDIO_STATE_SPEECH_GENERATION:  return "SPEECH_GENERATION";
-        case SENTRA_AUDIO_STATE_PLAYBACK:           return "PLAYBACK";
-        case SENTRA_AUDIO_STATE_ERROR:              return "ERROR";
-        case SENTRA_AUDIO_STATE_CANCELLED:          return "CANCELLED";
-        case SENTRA_AUDIO_STATE_DISCONNECTED:       return "DISCONNECTED";
-        default:                                    return "UNKNOWN";
+        case SENTRA_AUDIO_STATE_STANDBY:           return "STANDBY";
+        case SENTRA_AUDIO_STATE_RECORDING:         return "RECORDING";
+        case SENTRA_AUDIO_STATE_TRANSCRIBING:      return "TRANSCRIBING";
+        case SENTRA_AUDIO_STATE_REASONING:         return "REASONING";
+        case SENTRA_AUDIO_STATE_SPEECH_GENERATION: return "SPEECH_GENERATION";
+        case SENTRA_AUDIO_STATE_PLAYBACK:          return "PLAYBACK";
+        case SENTRA_AUDIO_STATE_ERROR:             return "ERROR";
+        case SENTRA_AUDIO_STATE_CANCELLED:         return "CANCELLED";
+        case SENTRA_AUDIO_STATE_DISCONNECTED:      return "DISCONNECTED";
+        default:                                   return "UNKNOWN";
     }
 }
 
 static void set_audio_state(sentra_audio_state_t new_state) {
-    ESP_LOGI(TAG, "Audio State Transition: [%s] -> [%s]",
-             sentra_audio_state_to_string(s_current_state),
-             sentra_audio_state_to_string(new_state));
-    s_current_state = new_state;
-}
-
-static esp_err_t init_i2c_bus(void) {
-    i2c_config_t conf = {
-        .mode = I2C_MODE_MASTER,
-        .sda_io_num = SENTRA_PIN_I2C_SDA,
-        .sda_pullup_en = GPIO_PULLUP_ENABLE,
-        .scl_io_num = SENTRA_PIN_I2C_SCL,
-        .scl_pullup_en = GPIO_PULLUP_ENABLE,
-        .master.clk_speed = SENTRA_I2C_FREQ_HZ,
-    };
-    esp_err_t err = i2c_param_config(I2C_NUM_0, &conf);
-    if (err == ESP_OK) {
-        err = i2c_driver_install(I2C_NUM_0, conf.mode, 0, 0, 0);
+    if (s_current_state != new_state) {
+        ESP_LOGI(TAG, "Audio State Transition: [%s] -> [%s]",
+                 sentra_audio_state_to_string(s_current_state),
+                 sentra_audio_state_to_string(new_state));
+        s_current_state = new_state;
     }
-    return err;
 }
 
 static void init_button(void) {
+    if (SENTRA_PIN_ACTION_BUTTON < 0) return;
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << SENTRA_PIN_ACTION_BUTTON),
         .mode = GPIO_MODE_INPUT,
@@ -84,65 +82,50 @@ static void init_button(void) {
     gpio_config(&io_conf);
 }
 
-/**
- * @brief FreeRTOS task handling the Voice Turn audio cycle.
- */
+#ifdef CONFIG_SENTRA_ENABLE_WM8960
 static void audio_lifecycle_task(void *pvParameters) {
-    // Allocate 256KB buffer in PSRAM (or internal heap) for 8 seconds 16kHz WAV
-    uint8_t *wav_buffer = (uint8_t *)malloc(SENTRA_AUDIO_REC_BUFFER_SIZE + SENTRA_AUDIO_WAV_HEADER_SIZE);
+    (void)pvParameters;
+    size_t alloc_size = SENTRA_AUDIO_REC_BUFFER_SIZE + SENTRA_AUDIO_WAV_HEADER_SIZE;
+    uint8_t *wav_buffer = (uint8_t *)heap_caps_malloc(alloc_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!wav_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate audio recording buffer! PSRAM required for N16R8.");
+        wav_buffer = (uint8_t *)malloc(alloc_size);
+    }
+    if (!wav_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate audio recording buffer!");
         vTaskDelete(NULL);
         return;
     }
 
-    ESP_LOGI(TAG, "Audio lifecycle task running. Push action button (GPIO %d) to speak.", SENTRA_PIN_ACTION_BUTTON);
+    ESP_LOGI(TAG, "Audio lifecycle task active (PTT GPIO %d).", SENTRA_PIN_ACTION_BUTTON);
+    int64_t last_poll_ms = 0;
 
     while (1) {
-        // Wait for user button press (Active Low) or wake condition
-        if (gpio_get_level((gpio_num_t)SENTRA_PIN_ACTION_BUTTON) == 0) {
-            // Debounce
+        if (SENTRA_PIN_ACTION_BUTTON >= 0 && gpio_get_level((gpio_num_t)SENTRA_PIN_ACTION_BUTTON) == 0) {
             vTaskDelay(pdMS_TO_TICKS(50));
             if (gpio_get_level((gpio_num_t)SENTRA_PIN_ACTION_BUTTON) == 0) {
-                ESP_LOGI(TAG, "Voice recording triggered by user button.");
-
-                // 1. Play listening chime to signal microphone is active
                 local_alerts_play(SENTRA_ALERT_MIC_ACTIVATED);
-
-                // 2. Transition to RECORDING
                 set_audio_state(SENTRA_AUDIO_STATE_RECORDING);
 
                 size_t bytes_written = 0;
-                // Record 3.5 seconds utterance
                 esp_err_t rec_err = i2s_audio_record_wav(wav_buffer, SENTRA_AUDIO_REC_BUFFER_SIZE, 3500, &bytes_written);
-
-                // Play stop click
                 local_alerts_play(SENTRA_ALERT_MIC_STOPPED);
 
                 if (rec_err == ESP_OK && bytes_written > 44) {
-                    // 3. Transition to TRANSCRIBING & REASONING
                     set_audio_state(SENTRA_AUDIO_STATE_TRANSCRIBING);
-
                     sentra_http_utterance_result_t result = {0};
                     esp_err_t upload_err = audio_http_upload_utterance(wav_buffer, bytes_written, s_audio_sequence++, &result);
-
                     if (upload_err == ESP_OK && result.ok) {
                         if (result.wake_detected && strlen(result.audio_reply_id) > 0) {
-                            // 4. Transition to PLAYBACK
                             set_audio_state(SENTRA_AUDIO_STATE_PLAYBACK);
                             audio_http_fetch_and_play_reply(result.audio_reply_id);
-                        } else if (!result.wake_detected) {
-                            ESP_LOGI(TAG, "Utterance ignored (no wake word detected).");
                         }
                         set_audio_state(SENTRA_AUDIO_STATE_STANDBY);
                     } else {
-                        ESP_LOGE(TAG, "Upload failed or server rejected utterance.");
                         set_audio_state(SENTRA_AUDIO_STATE_ERROR);
                         vTaskDelay(pdMS_TO_TICKS(1000));
                         set_audio_state(SENTRA_AUDIO_STATE_STANDBY);
                     }
                 } else {
-                    ESP_LOGE(TAG, "Microphone recording failed.");
                     set_audio_state(SENTRA_AUDIO_STATE_ERROR);
                     vTaskDelay(pdMS_TO_TICKS(1000));
                     set_audio_state(SENTRA_AUDIO_STATE_STANDBY);
@@ -150,59 +133,106 @@ static void audio_lifecycle_task(void *pvParameters) {
             }
         }
 
-        // Periodically poll device action queue (every 1 second)
-        audio_http_poll_and_execute_actions();
-
-        vTaskDelay(pdMS_TO_TICKS(250));
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        if (wifi_transport_is_connected() && (now_ms - last_poll_ms >= 1000)) {
+            last_poll_ms = now_ms;
+            audio_http_poll_and_execute_actions();
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
     }
 }
+#else
+static void control_poll_task(void *pvParameters) {
+    (void)pvParameters;
+    ESP_LOGI(TAG, "Action/config poll task active (WM8960 audio disabled).");
+    for (;;) {
+        if (wifi_transport_is_connected()) {
+            audio_http_poll_and_execute_actions();
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+#endif
 
 /**
- * @brief Safety telemetry task monitoring forward & downward ToF sensors.
- * Triggers autonomous immediate local alert tones directly without cloud dependency.
+ * @brief Reads single forward VL53L0X + checks IMU recalibration requests.
  */
 static void sensor_safety_task(void *pvParameters) {
-    ESP_LOGW(TAG, "ToF ranging is not implemented in this commit: local sensor warnings are INACTIVE");
+    (void)pvParameters;
+    uint8_t consecutive_tof_errors = 0;
 
     while (1) {
-        // In real hardware, read VL53L0X forward distance & ground cliff distance via I2C.
-        // Example threshold evaluation:
-        // if (fwd_cm < SENTRA_HAZARD_OBSTACLE_CM) {
-        //     local_alerts_play(SENTRA_ALERT_OBSTACLE_CLOSE);
-        // } else if (down_mm > SENTRA_HAZARD_CLIFF_MM) {
-        //     local_alerts_play(SENTRA_ALERT_CLIFF_DROPOFF);
-        // }
+        sentra_runtime_config_t cfg = {0};
+        sentra_nvs_config_get(&cfg);
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz obstacle scanning loop
+        if (s_imu_ready && sentra_nvs_consume_imu_recalibration_request()) {
+            ESP_LOGI(TAG, "Running remote IMU bias recalibration...");
+            sentra_mpu6050_calibrate(I2C_NUM_0, 40);
+        }
+
+#ifdef CONFIG_SENTRA_ENABLE_VL53L0X
+        if (s_forward_tof_ready) {
+            vl53l0x_reading_t reading = {0};
+            esp_err_t err = vl53l0x_read_validated(I2C_NUM_0, SENTRA_VL53L0X_I2C_ADDR, &reading);
+            if (err == ESP_OK) {
+                consecutive_tof_errors = 0;
+                sentra_telemetry_update_forward_tof(&reading);
+                if (reading.valid && reading.distance_cm <= (float)cfg.proximity_critical_cm) {
+                    local_alerts_play(SENTRA_ALERT_OBSTACLE_CLOSE);
+                }
+            } else {
+                consecutive_tof_errors++;
+                sentra_telemetry_update_forward_tof(&reading);
+                if (consecutive_tof_errors >= 5) {
+                    ESP_LOGW(TAG, "Forward VL53L0X stalled; attempting re-init...");
+                    s_forward_tof_ready =
+                        (vl53l0x_init_single(I2C_NUM_0, SENTRA_PIN_TOF_FWD_XSHUT, SENTRA_VL53L0X_I2C_ADDR) == ESP_OK);
+                    sentra_telemetry_set_forward_tof_initialized(s_forward_tof_ready);
+                    consecutive_tof_errors = 0;
+                }
+            }
+        }
+#endif
+
+        uint32_t interval = cfg.tof_sample_interval_ms >= 50 ? cfg.tof_sample_interval_ms : 250;
+        vTaskDelay(pdMS_TO_TICKS(interval));
     }
 }
-
-/* Camera enabled only after manual confirmation of provisional GPIO pinout. */
-static bool s_camera_ready = false;
 
 static void camera_upload_task(void *argument) {
     (void)argument;
     uint32_t frame_sequence = 1;
+    int64_t last_upload_ms = 0;
+
     for (;;) {
+        sentra_runtime_config_t cfg = {0};
+        sentra_nvs_config_get(&cfg);
+        int64_t now_ms = esp_timer_get_time() / 1000;
+        bool immediate = sentra_nvs_consume_immediate_frame_request();
+        uint32_t interval_ms = cfg.frame_upload_interval_ms >= 250 ? cfg.frame_upload_interval_ms : 1200;
+
         if (s_camera_ready && wifi_transport_is_connected() &&
-            SENTRA_DEFAULT_DEVICE_TOKEN[0] != 0) {
+            cfg.device_token[0] != '\0' && cfg.server_url[0] != '\0' &&
+            (immediate || (now_ms - last_upload_ms >= (int64_t)interval_ms))) {
+            last_upload_ms = now_ms;
             sentra_camera_frame_t frame = {0};
             if (camera_driver_capture(&frame) == ESP_OK) {
                 esp_err_t result = camera_driver_upload_frame(
-                    &frame, SENTRA_DEFAULT_SERVER_URL, SENTRA_DEVICE_ID,
-                    SENTRA_DEFAULT_DEVICE_TOKEN, frame_sequence++);
+                    &frame, cfg.server_url, cfg.device_id, cfg.device_token, frame_sequence++
+                );
                 camera_driver_release(&frame);
-                if (result != ESP_OK) ESP_LOGW(TAG, "Camera JPEG upload unsuccessful");
+                if (result != ESP_OK) {
+                    ESP_LOGW(TAG, "Camera JPEG upload unsuccessful: %s", esp_err_to_name(result));
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(1200));
+        vTaskDelay(pdMS_TO_TICKS(150));
     }
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Starting SENTRA Wearable (ESP32-S3 N16R8 + Waveshare WM8960)...");
+    ESP_LOGI(TAG, "Starting SENTRA Wearable Firmware %s (ESP32-S3 N16R8)...", SENTRA_FIRMWARE_VERSION);
 
-    // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -210,62 +240,84 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    // Initialize Push-to-Talk button
+    ESP_ERROR_CHECK(sentra_nvs_config_load());
+    sentra_runtime_config_t cfg = {0};
+    sentra_nvs_config_get(&cfg);
+
     init_button();
 
-    // 1. Initialize Shared I2C Bus (SDA: GPIO 47, SCL: GPIO 48)
-    ret = init_i2c_bus();
+    ret = sentra_i2c_bus_init(I2C_NUM_0, SENTRA_PIN_I2C_SDA, SENTRA_PIN_I2C_SCL, SENTRA_I2C_FREQ_HZ);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C initialization failed: %s", esp_err_to_name(ret));
     }
 
-    bool imu_ready = false;
+#ifdef CONFIG_SENTRA_ENABLE_MPU6050
     if (ret == ESP_OK) {
         esp_err_t imu_status = sentra_mpu6050_init(I2C_NUM_0);
-        imu_ready = (imu_status == ESP_OK);
-        if (!imu_ready) ESP_LOGW(TAG, "MPU6050 unavailable: %s", esp_err_to_name(imu_status));
+        s_imu_ready = (imu_status == ESP_OK);
+        if (!s_imu_ready) ESP_LOGW(TAG, "MPU6050 unavailable: %s", esp_err_to_name(imu_status));
     }
-    sentra_telemetry_set_imu_initialized(imu_ready);
+#endif
+    sentra_telemetry_set_imu_initialized(s_imu_ready);
 
-    // 2. Initialize Waveshare WM8960 Audio Codec
-    ret = wm8960_init(I2C_NUM_0);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "WM8960 Codec initialization failed: %s", esp_err_to_name(ret));
+#ifdef CONFIG_SENTRA_ENABLE_VL53L0X
+    if (ret == ESP_OK) {
+        esp_err_t tof_status = vl53l0x_init_single(I2C_NUM_0, SENTRA_PIN_TOF_FWD_XSHUT, SENTRA_VL53L0X_I2C_ADDR);
+        s_forward_tof_ready = (tof_status == ESP_OK);
+        if (!s_forward_tof_ready) {
+            ESP_LOGW(TAG, "Forward VL53L0X unavailable: %s", esp_err_to_name(tof_status));
+        }
     }
+#endif
+    sentra_telemetry_set_forward_tof_initialized(s_forward_tof_ready);
 
-    // 3. Initialize ESP32-S3 I2S Duplex Audio Driver
-    ret = i2s_audio_init();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "I2S driver initialization failed: %s", esp_err_to_name(ret));
+    /* Optional VL53L5CX remains unavailable unless explicitly built and probed */
+    sentra_telemetry_set_vl53l5cx_initialized(vl53l5cx_optional_init(I2C_NUM_0) == ESP_OK);
+
+#ifdef CONFIG_SENTRA_ENABLE_WM8960
+    if (wm8960_init(I2C_NUM_0) == ESP_OK && i2s_audio_init() == ESP_OK) {
+        s_wm8960_ready = true;
+    } else {
+        ESP_LOGW(TAG, "Optional WM8960 audio codec failed to initialize.");
     }
+#else
+    ESP_LOGI(TAG, "Optional WM8960 audio codec disabled by default (CONFIG_SENTRA_ENABLE_WM8960=n).");
+#endif
+    sentra_telemetry_set_wm8960_initialized(s_wm8960_ready);
 
-    /* Configure local Wi-Fi backend credentials with idf.py menuconfig.
-       Device must be registered with the operator to obtain its token. */
-    if (SENTRA_WIFI_SSID[0] != 0 && SENTRA_DEFAULT_SERVER_URL[0] != 0 &&
-        SENTRA_DEFAULT_DEVICE_TOKEN[0] != 0) {
+    if (cfg.wifi_ssid[0] != '\0' && cfg.server_url[0] != '\0' && cfg.device_token[0] != '\0') {
         ret = wifi_transport_init();
-        if (ret == ESP_OK) ret = wifi_transport_connect(SENTRA_WIFI_SSID, SENTRA_WIFI_PASS);
+        if (ret == ESP_OK) ret = wifi_transport_connect(cfg.wifi_ssid, cfg.wifi_password);
         if (ret != ESP_OK) ESP_LOGE(TAG, "Wi-Fi initialization failed: %s", esp_err_to_name(ret));
     } else {
-        ESP_LOGW(TAG, "Wi-Fi not configured: set SSID, backend URL and device token");
+        ESP_LOGW(TAG, "Wi-Fi/server credentials unset: configure via menuconfig or NVS 'sentra_cfg'.");
     }
 
-#if CONFIG_SENTRA_ENABLE_CAMERA
+#ifdef CONFIG_SENTRA_ENABLE_CAMERA
     ret = camera_driver_init();
-    s_camera_ready = ret == ESP_OK;
-    if (!s_camera_ready) ESP_LOGW(TAG, "Camera unavailable: %s", esp_err_to_name(ret));
+    s_camera_ready = (ret == ESP_OK);
+    if (!s_camera_ready) ESP_LOGW(TAG, "OV2640 camera unavailable: %s", esp_err_to_name(ret));
 #else
-    ESP_LOGW(TAG, "Camera disabled: board-specific DVP pin and cable verification pending");
+    ESP_LOGW(TAG, "OV2640 camera disabled until board pinout and DVP wiring are confirmed.");
 #endif
     sentra_telemetry_set_camera_initialized(s_camera_ready);
 
-    // Launch FreeRTOS Tasks
+#ifdef CONFIG_SENTRA_ENABLE_WM8960
     xTaskCreatePinnedToCore(audio_lifecycle_task, "audio_task", 8192, NULL, 5, NULL, 1);
+#else
+    xTaskCreatePinnedToCore(control_poll_task, "poll_task", 4096, NULL, 4, NULL, 1);
+#endif
     xTaskCreatePinnedToCore(sensor_safety_task, "sensor_task", 4096, NULL, 10, NULL, 0);
     xTaskCreatePinnedToCore(sentra_telemetry_task, "telemetry_task", 6144, NULL, 4, NULL, 0);
-#if CONFIG_SENTRA_ENABLE_CAMERA
-    if (s_camera_ready) xTaskCreatePinnedToCore(camera_upload_task, "camera_task", 6144, NULL, 4, NULL, 0);
+#ifdef CONFIG_SENTRA_ENABLE_CAMERA
+    if (s_camera_ready) {
+        xTaskCreatePinnedToCore(camera_upload_task, "camera_task", 6144, NULL, 4, NULL, 0);
+    }
 #endif
 
-    ESP_LOGI(TAG, "SENTRA Wearable Firmware initialized successfully. System is in STANDBY.");
+    ESP_LOGI(TAG, "SENTRA Firmware ready (VL53L0X=%s, MPU6050=%s, OV2640=%s, WM8960=%s).",
+             s_forward_tof_ready ? "ON" : "OFF",
+             s_imu_ready ? "ON" : "OFF",
+             s_camera_ready ? "ON" : "OFF",
+             s_wm8960_ready ? "ON" : "OFF");
 }

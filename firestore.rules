@@ -1,0 +1,294 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidDeviceId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 64 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserSettings(data) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'speechRate', 'voiceVolume', 'voiceMuted',
+          'audioFeedback', 'reachGuidanceEnabled', 'preferredVoiceName',
+          'selectedWearableDeviceId', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'displayName', 'speechRate', 'voiceVolume', 'voiceMuted',
+          'audioFeedback', 'reachGuidanceEnabled', 'preferredVoiceName',
+          'selectedWearableDeviceId', 'createdAt', 'updatedAt'
+        ])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 80
+        && data.speechRate is number
+        && data.speechRate >= 0.5
+        && data.speechRate <= 2.0
+        && data.voiceVolume is number
+        && data.voiceVolume >= 0
+        && data.voiceVolume <= 1
+        && data.voiceMuted is bool
+        && data.audioFeedback is bool
+        && data.reachGuidanceEnabled is bool
+        && data.preferredVoiceName is string
+        && data.preferredVoiceName in ['Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir']
+        && data.selectedWearableDeviceId is string
+        && isValidDeviceId(data.selectedWearableDeviceId)
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPrivateProfile(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && isValidId(data.uid)
+        && data.uid == request.auth.uid
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 160
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMemoryRecord(data) {
+      return data.keys().hasAll(['userId', 'label', 'note', 'room', 'source', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['userId', 'label', 'note', 'room', 'source', 'createdAt', 'updatedAt'])
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userId == request.auth.uid
+        && data.label is string
+        && data.label.size() >= 1
+        && data.label.size() <= 120
+        && data.note is string
+        && data.note.size() >= 1
+        && data.note.size() <= 1000
+        && data.room is string
+        && data.room.size() >= 1
+        && data.room.size() <= 80
+        && data.source is string
+        && data.source in ['live_verified', 'remembered_historical', 'user_manual']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWearableDeviceProfile(data) {
+      return data.keys().hasAll([
+          'userId', 'deviceId', 'friendlyName', 'firmwareVersion',
+          'frameSize', 'jpegQuality', 'tofSampleIntervalMs', 'proximityCriticalCm',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'deviceId', 'friendlyName', 'firmwareVersion',
+          'frameSize', 'jpegQuality', 'tofSampleIntervalMs', 'proximityCriticalCm',
+          'createdAt', 'updatedAt'
+        ])
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userId == request.auth.uid
+        && data.deviceId is string
+        && isValidDeviceId(data.deviceId)
+        && data.friendlyName is string
+        && data.friendlyName.size() >= 1
+        && data.friendlyName.size() <= 80
+        && data.firmwareVersion is string
+        && data.firmwareVersion.size() >= 1
+        && data.firmwareVersion.size() <= 40
+        && data.frameSize is string
+        && data.frameSize in ['QVGA', 'VGA', 'SVGA']
+        && data.jpegQuality is number
+        && data.jpegQuality >= 4
+        && data.jpegQuality <= 63
+        && data.tofSampleIntervalMs is number
+        && data.tofSampleIntervalMs >= 50
+        && data.tofSampleIntervalMs <= 5000
+        && data.proximityCriticalCm is number
+        && data.proximityCriticalCm >= 10
+        && data.proximityCriticalCm <= 250
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidVoiceConversationLog(data) {
+      return data.keys().hasAll([
+          'userId', 'deviceId', 'model', 'userTranscript', 'assistantTranscript',
+          'forwardDistanceCm', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'deviceId', 'model', 'userTranscript', 'assistantTranscript',
+          'forwardDistanceCm', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.userId is string
+        && isValidId(data.userId)
+        && data.userId == request.auth.uid
+        && data.deviceId is string
+        && isValidDeviceId(data.deviceId)
+        && data.model is string
+        && data.model.size() >= 1
+        && data.model.size() <= 64
+        && data.userTranscript is string
+        && data.userTranscript.size() <= 2000
+        && data.assistantTranscript is string
+        && data.assistantTranscript.size() >= 1
+        && data.assistantTranscript.size() <= 4000
+        && data.forwardDistanceCm is number
+        && data.forwardDistanceCm >= -1
+        && data.forwardDistanceCm <= 2000
+        && data.status is string
+        && data.status in ['active', 'completed']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // User preferences & non-PII profile
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid;
+      allow list: if false;
+      allow create: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserSettings(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && userId == request.auth.uid
+        && isValidUserSettings(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName', 'speechRate', 'voiceVolume', 'voiceMuted',
+          'audioFeedback', 'reachGuidanceEnabled', 'preferredVoiceName',
+          'selectedWearableDeviceId', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedUser() && isValidId(userId) && userId == request.auth.uid;
+
+      // Strictly isolated private PII profile
+      match /private/{profileDocId} {
+        allow get: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && profileDocId == 'profile';
+        allow list: if false;
+        allow create: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && profileDocId == 'profile'
+          && isValidPrivateProfile(incoming())
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && profileDocId == 'profile'
+          && isValidPrivateProfile(incoming())
+          && incoming().uid == existing().uid
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if isVerifiedUser()
+          && isValidId(userId)
+          && userId == request.auth.uid
+          && profileDocId == 'profile';
+      }
+    }
+
+    // Contextual memories (owner-scoped)
+    match /memories/{memoryId} {
+      allow get: if isVerifiedUser() && isValidId(memoryId) && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(memoryId)
+        && isValidMemoryRecord(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(memoryId)
+        && existing().userId == request.auth.uid
+        && isValidMemoryRecord(incoming())
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['label', 'note', 'room', 'source', 'updatedAt']);
+      allow delete: if isVerifiedUser() && isValidId(memoryId) && existing().userId == request.auth.uid;
+    }
+
+    // Paired ESP32-S3 wearable hardware profiles (owner-scoped)
+    match /wearableDevices/{deviceId} {
+      allow get: if isVerifiedUser() && isValidDeviceId(deviceId) && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidDeviceId(deviceId)
+        && isValidWearableDeviceProfile(incoming())
+        && incoming().deviceId == deviceId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidDeviceId(deviceId)
+        && existing().userId == request.auth.uid
+        && isValidWearableDeviceProfile(incoming())
+        && incoming().userId == existing().userId
+        && incoming().deviceId == existing().deviceId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'friendlyName', 'firmwareVersion', 'frameSize', 'jpegQuality',
+          'tofSampleIntervalMs', 'proximityCriticalCm', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedUser() && isValidDeviceId(deviceId) && existing().userId == request.auth.uid;
+    }
+
+    // Live Gemini 3.8 voice conversation logs (terminal state locked on completion)
+    match /conversations/{sessionId} {
+      allow get: if isVerifiedUser() && isValidId(sessionId) && existing().userId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.userId == request.auth.uid;
+      allow create: if isVerifiedUser()
+        && isValidId(sessionId)
+        && isValidVoiceConversationLog(incoming())
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(sessionId)
+        && existing().userId == request.auth.uid
+        && existing().status != 'completed'
+        && isValidVoiceConversationLog(incoming())
+        && incoming().userId == existing().userId
+        && incoming().deviceId == existing().deviceId
+        && incoming().model == existing().model
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userTranscript', 'assistantTranscript', 'forwardDistanceCm', 'status', 'updatedAt'
+        ]);
+      allow delete: if isVerifiedUser() && isValidId(sessionId) && existing().userId == request.auth.uid;
+    }
+  }
+}

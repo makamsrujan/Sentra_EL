@@ -5,6 +5,7 @@
 
 #include "wm8960.h"
 #include "sentra_config.h"
+#include "i2c_bus.h"
 #include "esp_log.h"
 #include "driver/i2c.h"
 #include "freertos/FreeRTOS.h"
@@ -19,6 +20,8 @@ esp_err_t wm8960_write_reg(int i2c_num, uint8_t reg_addr, uint16_t reg_val) {
     /* Byte 1: lower 8 bits of data */
     data[1] = (uint8_t)(reg_val & 0xFF);
 
+    if (!sentra_i2c_bus_lock(200)) return ESP_ERR_TIMEOUT;
+
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (WM8960_I2C_ADDR << 1) | I2C_MASTER_WRITE, true);
@@ -27,6 +30,7 @@ esp_err_t wm8960_write_reg(int i2c_num, uint8_t reg_addr, uint16_t reg_val) {
 
     esp_err_t ret = i2c_master_cmd_begin((i2c_port_t)i2c_num, cmd, pdMS_TO_TICKS(100));
     i2c_cmd_link_delete(cmd);
+    sentra_i2c_bus_unlock();
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "I2C write error reg 0x%02X val 0x%03X: %s", reg_addr, reg_val, esp_err_to_name(ret));

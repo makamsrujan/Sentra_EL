@@ -2,19 +2,22 @@ import crypto from 'node:crypto';
 import type { Response } from 'express';
 import type {
   DeviceCapabilities,
+  DeviceCommandType,
   DeviceLiveState,
+  DeviceRuntimeConfig,
   DeviceSourceMode,
+  SensorHealthReport,
   TelemetryPayloadV1,
   WearableActionItem,
   WearableFrameStatus,
 } from '../src/types/deviceProtocol';
 import type { GoalTask } from '../src/types/sentra';
+import { DEFAULT_DEVICE_RUNTIME_CONFIG, FusionAlertPrioritizer } from '../src/utils/sensorFusion';
 import { hashToken, SentraEventStore } from './eventStore';
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = Number(process.env.SENTRA_HEARTBEAT_TIMEOUT_MS || 15000);
 const FRAME_STALE_THRESHOLD_MS = Number(process.env.SENTRA_FRAME_STALE_MS || 5000);
 const MAX_ACTION_QUEUE_PER_DEVICE = 20;
-const ALERT_DEDUP_WINDOW_MS = 8000;
 
 interface FrameEntry {
   buffer: Buffer;
@@ -27,6 +30,7 @@ interface FrameEntry {
 interface InternalDeviceState {
   deviceId: string;
   name: string;
+  firmwareVersion: string | null;
   isSimulator: boolean;
   connected: boolean;
   lastHeartbeatAt: number | null;
@@ -38,11 +42,14 @@ interface InternalDeviceState {
   earphoneConnected: boolean | null;
   audioVolume: number | null;
   sensors: DeviceLiveState['sensors'];
+  sensorHealth: SensorHealthReport;
+  diagnostics: string | null;
   capabilities: DeviceCapabilities;
+  runtimeConfig: DeviceRuntimeConfig;
   frame: FrameEntry | null;
   frameSequenceCounter: number;
   actions: WearableActionItem[];
-  lastAlertTimes: Record<string, number>;
+  alertPrioritizer: FusionAlertPrioritizer;
   activeGoal: GoalTask | null;
 }
 
@@ -97,6 +104,18 @@ export class DeviceGateway {
     return false;
   }
 
+  private createDefaultHealth(capabilities: DeviceCapabilities): SensorHealthReport {
+    return {
+      forwardToF: capabilities.forwardToF ? 'unavailable' : 'unavailable',
+      downwardToF: capabilities.downwardToF ? 'unavailable' : 'unavailable',
+      imu: capabilities.imu ? 'unavailable' : 'unavailable',
+      imuCalibrated: false,
+      camera: capabilities.camera ? 'unavailable' : 'unavailable',
+      vl53l5cx: capabilities.vl53l5cx ? 'unavailable' : 'unavailable',
+      wm8960: capabilities.audioOutput ? 'unavailable' : 'unavailable',
+    };
+  }
+
   private createEmptyState(
     deviceId: string,
     name: string,
@@ -106,6 +125,7 @@ export class DeviceGateway {
     return {
       deviceId,
       name,
+      firmwareVersion: null,
       isSimulator,
       connected: false,
       lastHeartbeatAt: null,
@@ -121,12 +141,19 @@ export class DeviceGateway {
         downwardDistanceMm: null,
         headPitchDeg: null,
         imu: null,
+        vl53l5cx: null,
       },
-      capabilities,
+      sensorHealth: this.createDefaultHealth(capabilities),
+      diagnostics: null,
+      capabilities: {
+        ...capabilities,
+        vl53l5cx: Boolean(capabilities.vl53l5cx),
+      },
+      runtimeConfig: { ...DEFAULT_DEVICE_RUNTIME_CONFIG },
       frame: null,
       frameSequenceCounter: 0,
       actions: [],
-      lastAlertTimes: {},
+      alertPrioritizer: new FusionAlertPrioritizer(),
       activeGoal: null,
     };
   }
@@ -159,7 +186,7 @@ export class DeviceGateway {
     const existing = this.devices.get(params.deviceId);
     if (existing) {
       existing.name = params.name;
-      existing.capabilities = params.capabilities;
+      existing.capabilities = { ...params.capabilities, vl53l5cx: Boolean(params.capabilities.vl53l5cx) };
     } else {
       this.devices.set(
         params.deviceId,
@@ -199,6 +226,60 @@ export class DeviceGateway {
     }
 
     return false;
+  }
+
+  private resolveSensorHealth(state: InternalDeviceState, payload: TelemetryPayloadV1, now: number): SensorHealthReport {
+    const incoming = payload.sensorHealth || {};
+    const caps = payload.capabilities;
+    const frameAgeMs = state.frame ? Math.max(0, now - state.frame.receivedAt) : null;
+
+    const forwardToF =
+      incoming.forwardToF ??
+      (!caps.forwardToF
+        ? 'unavailable'
+        : payload.sensors.forwardDistanceCm !== null
+        ? 'valid'
+        : 'invalid');
+
+    const downwardToF =
+      incoming.downwardToF ??
+      (!caps.downwardToF
+        ? 'unavailable'
+        : payload.sensors.downwardDistanceMm !== null
+        ? 'valid'
+        : 'invalid');
+
+    const imu =
+      incoming.imu ??
+      (!caps.imu ? 'unavailable' : payload.sensors.imu !== null ? 'valid' : 'invalid');
+
+    const imuCalibrated = Boolean(incoming.imuCalibrated ?? payload.sensors.imu?.calibrated ?? false);
+
+    const camera =
+      incoming.camera ??
+      (!caps.camera
+        ? 'unavailable'
+        : !state.frame
+        ? 'unavailable'
+        : frameAgeMs !== null && frameAgeMs > FRAME_STALE_THRESHOLD_MS
+        ? 'stale'
+        : 'valid');
+
+    const vl53l5cx =
+      incoming.vl53l5cx ??
+      (caps.vl53l5cx && payload.sensors.vl53l5cx?.available ? 'valid' : 'unavailable');
+
+    const wm8960 = incoming.wm8960 ?? (caps.audioOutput ? 'valid' : 'unavailable');
+
+    return {
+      forwardToF,
+      downwardToF,
+      imu,
+      imuCalibrated,
+      camera,
+      vl53l5cx,
+      wm8960,
+    };
   }
 
   public ingestTelemetry(
@@ -253,6 +334,9 @@ export class DeviceGateway {
     state.lastTelemetryAt = now;
     state.lastSequence = payload.sequence;
     state.uptimeMs = payload.uptimeMs;
+    if (payload.firmwareVersion !== undefined) {
+      state.firmwareVersion = payload.firmwareVersion ?? null;
+    }
     state.batteryPercent = payload.batteryPercent ?? null;
     state.batteryCharging = payload.batteryCharging ?? null;
     state.earphoneConnected = payload.earphoneConnected ?? null;
@@ -262,13 +346,19 @@ export class DeviceGateway {
       downwardDistanceMm: payload.sensors.downwardDistanceMm,
       headPitchDeg: payload.sensors.headPitchDeg ?? null,
       imu: payload.sensors.imu,
+      vl53l5cx: payload.sensors.vl53l5cx ?? null,
     };
-    state.capabilities = payload.capabilities;
+    state.capabilities = {
+      ...payload.capabilities,
+      vl53l5cx: Boolean(payload.capabilities.vl53l5cx),
+    };
+    state.sensorHealth = this.resolveSensorHealth(state, payload, now);
+    state.diagnostics = payload.diagnostics ?? state.diagnostics;
 
     this.store.upsertDevice({
       deviceId: payload.deviceId,
       name: state.name,
-      capabilities: payload.capabilities,
+      capabilities: state.capabilities,
       isSimulator: sourceMode === 'simulator',
       lastSeenAt: now,
     });
@@ -297,16 +387,16 @@ export class DeviceGateway {
     });
 
     const triggeredAlerts: Array<{ type: string; severity: 'caution' | 'critical'; description: string }> = [];
+    const criticalCm = state.runtimeConfig.proximityCriticalCm;
+    const cooldownMs = state.runtimeConfig.alertCooldownMs;
 
-    // Forward ToF proximity alert (< 45cm, valid non-null sensor)
+    // Forward ToF proximity alert (< criticalCm, valid non-null sensor)
     if (
       payload.capabilities.forwardToF &&
       payload.sensors.forwardDistanceCm !== null &&
-      payload.sensors.forwardDistanceCm < 45
+      payload.sensors.forwardDistanceCm < criticalCm
     ) {
-      const lastTs = state.lastAlertTimes['obstacle'] || 0;
-      if (now - lastTs >= ALERT_DEDUP_WINDOW_MS) {
-        state.lastAlertTimes['obstacle'] = now;
+      if (state.alertPrioritizer.shouldEmit('obstacle', cooldownMs, now)) {
         const desc = `Forward sensor proximity alert: object within ${Math.round(payload.sensors.forwardDistanceCm)} cm.`;
         this.store.insertAlertEvent({
           deviceId: payload.deviceId,
@@ -326,15 +416,13 @@ export class DeviceGateway {
       }
     }
 
-    // Downward sensor change alert (> 200mm, explicitly framed without uncalibrated geometry claims)
+    // Downward sensor change alert (ONLY when downwardToF capability is explicitly equipped)
     if (
       payload.capabilities.downwardToF &&
       payload.sensors.downwardDistanceMm !== null &&
       payload.sensors.downwardDistanceMm > 200
     ) {
-      const lastTs = state.lastAlertTimes['dropoff'] || 0;
-      if (now - lastTs >= ALERT_DEDUP_WINDOW_MS) {
-        state.lastAlertTimes['dropoff'] = now;
+      if (state.alertPrioritizer.shouldEmit('dropoff', cooldownMs, now)) {
         const desc = `Downward distance reading increased to ${Math.round(payload.sensors.downwardDistanceMm)} mm (possible step-down or drop-off).`;
         this.store.insertAlertEvent({
           deviceId: payload.deviceId,
@@ -363,6 +451,109 @@ export class DeviceGateway {
     return { accepted: true, state: liveState, triggeredAlerts };
   }
 
+  public getDeviceConfig(deviceId?: string): DeviceRuntimeConfig {
+    if (deviceId) {
+      const state = this.devices.get(deviceId);
+      if (state) return { ...state.runtimeConfig };
+    }
+    const primary = this.getLiveState();
+    if (primary) return { ...primary.runtimeConfig };
+    return { ...DEFAULT_DEVICE_RUNTIME_CONFIG };
+  }
+
+  public updateDeviceConfig(
+    deviceId: string,
+    patch: Partial<DeviceRuntimeConfig>
+  ): { ok: boolean; config: DeviceRuntimeConfig; action: WearableActionItem | null } {
+    let state = this.devices.get(deviceId);
+    if (!state) {
+      const isSim = deviceId.startsWith('SIM-');
+      state = this.createEmptyState(
+        deviceId,
+        isSim ? 'Simulated Wearable Testbench' : deviceId,
+        {
+          camera: true,
+          forwardToF: true,
+          downwardToF: false,
+          imu: true,
+          audioOutput: false,
+          vl53l5cx: false,
+        },
+        isSim
+      );
+      this.devices.set(deviceId, state);
+    }
+
+    const nextCaution = patch.proximityCautionCm ?? state.runtimeConfig.proximityCautionCm;
+    const nextCritical = patch.proximityCriticalCm ?? state.runtimeConfig.proximityCriticalCm;
+    state.runtimeConfig = {
+      ...state.runtimeConfig,
+      ...patch,
+      proximityCriticalCm: Math.min(nextCritical, nextCaution - 5),
+      proximityCautionCm: Math.max(nextCaution, nextCritical + 5),
+    };
+
+    const action = this.enqueueAction(deviceId, {
+      type: 'config_update',
+      text: 'Apply updated sampling and threshold configuration.',
+      priority: 'normal',
+      payload: state.runtimeConfig as unknown as Record<string, unknown>,
+    });
+
+    this.broadcast('telemetry', this.toLiveState(state, Date.now()));
+    return { ok: true, config: { ...state.runtimeConfig }, action };
+  }
+
+  public enqueueCommand(params: {
+    deviceId: string;
+    command: DeviceCommandType;
+    text?: string;
+    priority?: 'normal' | 'critical';
+    payload?: Record<string, unknown>;
+  }): WearableActionItem | null {
+    const state = this.devices.get(params.deviceId);
+    if (!state) return null;
+
+    if (params.command === 'CAPTURE_FRAME') {
+      return this.enqueueAction(params.deviceId, {
+        type: 'capture_frame',
+        text: params.text || 'Capture and upload a fresh JPEG frame immediately.',
+        priority: params.priority ?? 'normal',
+        payload: params.payload ?? null,
+      });
+    }
+    if (params.command === 'RECALIBRATE_IMU') {
+      return this.enqueueAction(params.deviceId, {
+        type: 'recalibrate_imu',
+        text: params.text || 'Keep headband stationary and recalibrate MPU6050 offsets.',
+        priority: params.priority ?? 'normal',
+        payload: params.payload ?? null,
+      });
+    }
+    if (params.command === 'REQUEST_OBSERVATION') {
+      return this.enqueueAction(params.deviceId, {
+        type: 'active_perception',
+        text: params.text || 'Refresh forward sensor and camera observation.',
+        priority: params.priority ?? 'normal',
+        payload: params.payload ?? null,
+      });
+    }
+    if (params.command === 'CONFIG_UPDATE') {
+      return this.enqueueAction(params.deviceId, {
+        type: 'config_update',
+        text: params.text || 'Reload runtime configuration.',
+        priority: params.priority ?? 'normal',
+        payload: (params.payload ?? state.runtimeConfig) as Record<string, unknown>,
+      });
+    }
+    return this.enqueueAction(params.deviceId, {
+      type: 'speech',
+      text: params.text || 'Active voice prompt from SENTRA.',
+      priority: params.priority ?? 'normal',
+      payload: params.payload ?? null,
+    });
+  }
+
   public ingestFrame(params: {
     deviceId: string;
     buffer: Buffer;
@@ -386,6 +577,7 @@ export class DeviceGateway {
         downwardToF: false,
         imu: false,
         audioOutput: false,
+        vl53l5cx: false,
       };
       const name = params.sourceMode === 'simulator' ? 'Simulated Wearable Testbench' : params.deviceId;
       state = this.createEmptyState(params.deviceId, name, defaultCaps, params.sourceMode === 'simulator');
@@ -408,6 +600,7 @@ export class DeviceGateway {
     state.connected = true;
     state.lastHeartbeatAt = now;
     state.capabilities.camera = true;
+    state.sensorHealth.camera = 'valid';
     state.frame = {
       buffer: params.buffer,
       mimeType: 'image/jpeg',
@@ -442,10 +635,11 @@ export class DeviceGateway {
     if (!state || !state.frame) {
       return { available: false, stale: true, frame: null, ageMs: null };
     }
+    const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
     const ageMs = Math.max(0, Date.now() - state.frame.receivedAt);
     return {
       available: true,
-      stale: ageMs > FRAME_STALE_THRESHOLD_MS,
+      stale: ageMs > staleThreshold,
       frame: state.frame,
       ageMs,
     };
@@ -469,6 +663,7 @@ export class DeviceGateway {
       };
     }
 
+    const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
     const ageMs = Math.max(0, now - state.frame.receivedAt);
     return {
       ok: true,
@@ -477,7 +672,7 @@ export class DeviceGateway {
       sequence: state.frame.sequence,
       lastReceivedTimestamp: state.frame.receivedAt,
       frameAgeMs: ageMs,
-      stale: ageMs > FRAME_STALE_THRESHOLD_MS,
+      stale: ageMs > staleThreshold,
       imageFormat: state.frame.mimeType,
       sizeBytes: state.frame.sizeBytes,
       connectionStatus: this.computeSourceMode(state, now),
@@ -490,6 +685,7 @@ export class DeviceGateway {
       type: WearableActionItem['type'];
       text: string;
       priority: WearableActionItem['priority'];
+      payload?: Record<string, unknown> | null;
       audioReplyId?: string | null;
       audioUrl?: string | null;
       audioFormat?: 'wav' | null;
@@ -508,6 +704,7 @@ export class DeviceGateway {
       priority: action.priority,
       createdAt: Date.now(),
       acknowledgedAt: null,
+      payload: action.payload ?? null,
       audioReplyId: action.audioReplyId ?? null,
       audioUrl: action.audioUrl ?? null,
       audioFormat: action.audioFormat ?? null,
@@ -600,10 +797,12 @@ export class DeviceGateway {
     const sourceMode = this.computeSourceMode(state, now);
     const connected = sourceMode !== 'disconnected';
     const frameAgeMs = state.frame ? Math.max(0, now - state.frame.receivedAt) : null;
+    const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
 
     return {
       deviceId: state.deviceId,
       name: state.name,
+      firmwareVersion: state.firmwareVersion,
       sourceMode,
       connected,
       lastHeartbeatAt: state.lastHeartbeatAt,
@@ -615,12 +814,15 @@ export class DeviceGateway {
       earphoneConnected: state.earphoneConnected,
       audioVolume: state.audioVolume,
       sensors: state.sensors,
+      sensorHealth: state.sensorHealth,
+      diagnostics: state.diagnostics,
       capabilities: state.capabilities,
+      runtimeConfig: state.runtimeConfig,
       frameAvailable: Boolean(state.frame),
       frameSequence: state.frame?.sequence ?? null,
       frameTimestamp: state.frame?.receivedAt ?? null,
       frameAgeMs,
-      frameStale: frameAgeMs === null || frameAgeMs > FRAME_STALE_THRESHOLD_MS,
+      frameStale: frameAgeMs === null || frameAgeMs > staleThreshold,
       frameFormat: state.frame?.mimeType ?? null,
       pendingActionsCount: state.actions.filter((a) => a.acknowledgedAt === null).length,
     };

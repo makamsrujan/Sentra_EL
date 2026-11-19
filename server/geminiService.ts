@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from '@google/genai';
-import type { DeviceLiveState, PathSafetyStatus } from '../src/types/deviceProtocol';
+import type { DeviceLiveState, PathSafetyStatus, SensorFusionSummary } from '../src/types/deviceProtocol';
 import type {
   AnalysisErrorCode,
   AnalysisResponseData,
@@ -8,27 +8,27 @@ import type {
   SentraMode,
   SentraOperation,
 } from '../src/types/sentra';
+import { evaluateSensorFusion } from '../src/utils/sensorFusion';
 import { SentraEventStore } from './eventStore';
 import { decodeBase64Image, sanitizeGeminiResponse } from './validation';
 
 export const SUPPORTED_MODELS = [
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite-preview',
-  'gemini-3.6-flash',
   'gemini-3.8-flash',
   'gemini-4-hydrogen',
+  'gemini-3.6-flash',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
   'gemini-3.1-flash-lite',
   'gemini-4-argon',
   'gemini-4-carbon',
   'gemini-4-neon',
 ] as const;
 
-// Use the established fallback as the default until another model is verified via diagnostics.
-export const DEFAULT_PRIMARY_MODEL = 'gemini-2.5-flash';
-export const FALLBACK_MODEL = 'gemini-2.5-flash';
+// Default to gemini-3.8-flash with active gemini-4-hydrogen fallback.
+export const DEFAULT_PRIMARY_MODEL = 'gemini-3.8-flash';
+export const FALLBACK_MODEL = 'gemini-4-hydrogen';
 const GEMINI_TIMEOUT_MS = 9500;
+const BROWSER_FRAME_STALE_MS = Number(process.env.SENTRA_BROWSER_FRAME_STALE_MS || 20000);
 
 let lastWorkingModelState: string | null = null;
 
@@ -38,6 +38,8 @@ export interface ModelConfigValidation {
   configuredModel: string;
   errorMessage: string | null;
 }
+
+const RETIRED_MODEL_PREFIXES = ['gemini-2.5-', 'gemini-2.0-', 'gemini-1.5-', 'gemini-pro'];
 
 export function validateConfiguredModel(): ModelConfigValidation {
   const raw = process.env.SENTRA_GEMINI_MODEL?.trim() || null;
@@ -49,11 +51,24 @@ export function validateConfiguredModel(): ModelConfigValidation {
       errorMessage: null,
     };
   }
-  if ((SUPPORTED_MODELS as readonly string[]).includes(raw)) {
+  const normalized = raw.replace(/^models\//i, '');
+  if ((SUPPORTED_MODELS as readonly string[]).includes(normalized)) {
     return {
       valid: true,
       rawConfiguredModel: raw,
-      configuredModel: raw,
+      configuredModel: normalized,
+      errorMessage: null,
+    };
+  }
+  if (
+    RETIRED_MODEL_PREFIXES.some(
+      (prefix) => normalized.toLowerCase() === prefix || normalized.toLowerCase().startsWith(prefix)
+    )
+  ) {
+    return {
+      valid: true,
+      rawConfiguredModel: raw,
+      configuredModel: DEFAULT_PRIMARY_MODEL,
       errorMessage: null,
     };
   }
@@ -208,6 +223,7 @@ function resolveOperation(mode: SentraMode, query: string, explicitOp?: SentraOp
 function buildActiveHardwareHazard(device: DeviceLiveState | null): HazardAlert | null {
   if (!device || !device.connected) return null;
   const source = device.sourceMode === 'simulator' ? 'sensor_simulator' : 'sensor_hardware';
+  const criticalCm = device.runtimeConfig?.proximityCriticalCm ?? 45;
   if (
     device.capabilities.downwardToF &&
     device.sensors.downwardDistanceMm !== null &&
@@ -226,7 +242,7 @@ function buildActiveHardwareHazard(device: DeviceLiveState | null): HazardAlert 
   if (
     device.capabilities.forwardToF &&
     device.sensors.forwardDistanceCm !== null &&
-    device.sensors.forwardDistanceCm < 45
+    device.sensors.forwardDistanceCm <= criticalCm
   ) {
     return {
       id: `hw-prox-${device.lastSequence ?? Date.now()}`,
@@ -248,10 +264,21 @@ function buildTruthfulDegradedResponse(params: {
   goal?: string | null;
   memory: Array<{ label: string; note: string; room?: string }>;
   hardwareHazard: HazardAlert | null;
+  sensorFusion: SensorFusionSummary;
   hasFreshImage: boolean;
   frameTimestamp: number | null;
 }): AnalysisResponseData {
-  const { operation, errorCode, errorMessage, goal, memory, hardwareHazard, hasFreshImage, frameTimestamp } = params;
+  const {
+    operation,
+    errorCode,
+    errorMessage,
+    goal,
+    memory,
+    hardwareHazard,
+    sensorFusion,
+    hasFreshImage,
+    frameTimestamp,
+  } = params;
 
   let spoken = '';
   const pathStatus: PathSafetyStatus = hardwareHazard
@@ -310,6 +337,7 @@ function buildTruthfulDegradedResponse(params: {
     modelUsed: null,
     fallbackUsed: false,
     frameTimestamp,
+    sensorFusion,
     timestamp: Date.now(),
   };
 }
@@ -487,6 +515,7 @@ export async function runSentraAnalysis(params: {
 }): Promise<AnalysisResponseData> {
   const startTime = Date.now();
   const operation = resolveOperation(params.mode, params.query, params.explicitOperation);
+  const sensorFusion = evaluateSensorFusion(params.wearableDevice, startTime);
   const hardwareHazard = buildActiveHardwareHazard(params.wearableDevice);
 
   // Separate Device Status operation without unnecessary Gemini camera call
@@ -495,9 +524,9 @@ export async function runSentraAnalysis(params: {
     let spoken = 'No wearable hardware is currently connected.';
     if (dev && dev.connected) {
       const fwd =
-        dev.capabilities.forwardToF && dev.sensors.forwardDistanceCm !== null
-          ? `Forward distance reads ${Math.round(dev.sensors.forwardDistanceCm)} centimeters.`
-          : 'Forward distance sensor is unavailable.';
+        sensorFusion.forwardStatus === 'valid' && sensorFusion.forwardDistanceCm !== null
+          ? `Forward distance reads ${Math.round(sensorFusion.forwardDistanceCm)} centimeters.`
+          : `Forward distance sensor is ${sensorFusion.forwardStatus}.`;
       const bat = dev.batteryPercent !== null ? `Battery is at ${Math.round(dev.batteryPercent)} percent.` : '';
       spoken = `${dev.sourceMode === 'simulator' ? 'Simulated device' : 'Wearable device'} ${dev.deviceId} is connected. ${fwd} ${bat}`.trim();
     }
@@ -522,14 +551,16 @@ export async function runSentraAnalysis(params: {
       sceneDescription: spoken,
       spatialRelations: [],
       frameTimestamp: null,
+      sensorFusion,
       timestamp: Date.now(),
     };
   }
 
-  // Resolve image evidence cleanly
+  // Resolve image evidence cleanly and guard against stale images
   let inlineImagePart: { mimeType: string; data: string } | null = null;
   let frameTimestamp: number | null = params.imageTimestamp;
   let hasFreshImage = false;
+  let staleImageRejected = false;
 
   if (params.useWearableFrame) {
     if (params.wearableFrameBuffer && !params.wearableFrameBuffer.stale) {
@@ -539,16 +570,26 @@ export async function runSentraAnalysis(params: {
       };
       frameTimestamp = params.wearableFrameBuffer.receivedAt;
       hasFreshImage = true;
+    } else if (params.wearableFrameBuffer?.stale) {
+      staleImageRejected = true;
     }
   } else if (params.imageDataUrl) {
-    const decoded = decodeBase64Image(params.imageDataUrl);
-    if (decoded.ok) {
-      inlineImagePart = {
-        mimeType: decoded.mimeType,
-        data: decoded.base64Data,
-      };
-      hasFreshImage = true;
-      frameTimestamp = params.imageTimestamp ?? Date.now();
+    const isBrowserFrameStale =
+      params.imageTimestamp !== null &&
+      Number.isFinite(params.imageTimestamp) &&
+      startTime - params.imageTimestamp > BROWSER_FRAME_STALE_MS;
+    if (isBrowserFrameStale) {
+      staleImageRejected = true;
+    } else {
+      const decoded = decodeBase64Image(params.imageDataUrl);
+      if (decoded.ok) {
+        inlineImagePart = {
+          mimeType: decoded.mimeType,
+          data: decoded.base64Data,
+        };
+        hasFreshImage = true;
+        frameTimestamp = params.imageTimestamp ?? Date.now();
+      }
     }
   }
 
@@ -557,10 +598,13 @@ export async function runSentraAnalysis(params: {
     const degraded = buildTruthfulDegradedResponse({
       operation,
       errorCode: 'NO_FRESH_IMAGE',
-      errorMessage: 'No current camera frame available for visual inspection.',
+      errorMessage: staleImageRejected
+        ? 'Latest camera frame is stale and was excluded from live visual inspection.'
+        : 'No current camera frame available for visual inspection.',
       goal: params.goal,
       memory: params.memory,
       hardwareHazard,
+      sensorFusion,
       hasFreshImage: false,
       frameTimestamp: null,
     });
@@ -584,6 +628,7 @@ export async function runSentraAnalysis(params: {
       goal: params.goal,
       memory: params.memory,
       hardwareHazard,
+      sensorFusion,
       hasFreshImage,
       frameTimestamp,
     });
@@ -609,6 +654,7 @@ export async function runSentraAnalysis(params: {
       goal: params.goal,
       memory: params.memory,
       hardwareHazard,
+      sensorFusion,
       hasFreshImage,
       frameTimestamp,
     });
@@ -628,6 +674,7 @@ export async function runSentraAnalysis(params: {
     `OPERATION: ${operation}`,
     `MODE: ${params.mode}`,
     `CAMERA EVIDENCE AVAILABLE: ${hasFreshImage ? 'YES' : 'NO'}`,
+    `CAMERA PERSPECTIVE: ${params.useWearableFrame ? 'Headband-mounted OV2640 forward-facing camera' : 'Browser camera'}`,
   ];
   if (params.goal) lines.push(`ACTIVE GOAL: "${params.goal}"`);
   if (params.query) lines.push(`USER QUERY: "${params.query}"`);
@@ -638,12 +685,10 @@ export async function runSentraAnalysis(params: {
     lines.push(
       `WEARABLE TELEMETRY (${params.wearableDevice.sourceMode}, device=${params.wearableDevice.deviceId}):`
     );
-    lines.push(
-      `- Forward ToF: ${params.wearableDevice.sensors.forwardDistanceCm !== null ? `${params.wearableDevice.sensors.forwardDistanceCm} cm` : 'unavailable'}`
-    );
-    lines.push(
-      `- Downward ToF: ${params.wearableDevice.sensors.downwardDistanceMm !== null ? `${params.wearableDevice.sensors.downwardDistanceMm} mm` : 'unavailable'}`
-    );
+    lines.push(`- Fused Sensor Summary: ${sensorFusion.summaryText}`);
+    if (sensorFusion.advisories.length > 0) {
+      lines.push(`- Sensor Advisories: ${sensorFusion.advisories.join(' ; ')}`);
+    }
   }
 
   if (params.memory.length > 0) {
@@ -736,6 +781,7 @@ export async function runSentraAnalysis(params: {
           modelUsed: model,
           fallbackUsed: modelIdx > 0,
           frameTimestamp,
+          sensorFusion,
           timestamp: Date.now(),
         };
       } catch (err: any) {
@@ -762,6 +808,7 @@ export async function runSentraAnalysis(params: {
     goal: params.goal,
     memory: params.memory,
     hardwareHazard,
+    sensorFusion,
     hasFreshImage,
     frameTimestamp,
   });

@@ -1,6 +1,10 @@
 # SENTRA device configuration. Never commit sdkconfig files containing secrets.
 menu "SENTRA firmware configuration"
 
+config SENTRA_FIRMWARE_VERSION
+    string "Firmware version string"
+    default "1.1.0-prehw"
+
 config SENTRA_WIFI_SSID
     string "Wi-Fi SSID"
     default ""
@@ -21,9 +25,48 @@ config SENTRA_DEVICE_TOKEN
     string "Provisioned device token (secret; keep sdkconfig out of git)"
     default ""
 
+config SENTRA_ENABLE_VL53L0X
+    bool "Enable single forward VL53L0X ToF distance sensor"
+    default y
+    help
+        Confirmed single forward VL53L0X mounted on the headband.
+        Downward ToF is NOT installed on the baseline hardware.
+
+config SENTRA_VL53L0X_ADDR
+    hex "Forward VL53L0X 7-bit I2C address"
+    default 0x29
+    range 0x29 0x3F
+
+config SENTRA_ENABLE_MPU6050
+    bool "Enable GY-521 MPU6050 6-axis IMU"
+    default y
+
 config SENTRA_ENABLE_CAMERA
     bool "Enable OV2640 capture (requires verified board wiring)"
     default n
+
+config SENTRA_CAM_SHARE_I2C_PORT
+    bool "Share existing I2C port 0 for OV2640 SCCB"
+    default y
+    help
+        Prevents esp32-camera from installing a duplicate I2C driver on shared SDA/SCL.
+
+config SENTRA_CAM_DEFAULT_QUALITY
+    int "OV2640 JPEG quality (4=best, 63=lowest)"
+    default 12
+    range 4 63
+
+config SENTRA_ENABLE_WM8960
+    bool "Enable optional Waveshare WM8960 I2S audio codec"
+    default n
+    help
+        Keep disabled when testing headband OV2640 + VL53L0X + MPU6050 without audio board.
+
+config SENTRA_ENABLE_VL53L5CX
+    bool "Enable optional VL53L5CX multizone depth sensor"
+    default n
+    help
+        Optional capability flag; kept disabled and not required for normal operation.
 
 config SENTRA_ENABLE_VAD
     bool "Enable on-device voice activity detection"
@@ -37,5 +80,51 @@ config SENTRA_ENABLE_INA219
     default n
     help
         Requires implementation and verified INA219 wiring.
+
+config SENTRA_PIN_I2C_SDA
+    int "Shared I2C SDA GPIO (provisional)"
+    default 47
+
+config SENTRA_PIN_I2C_SCL
+    int "Shared I2C SCL GPIO (provisional)"
+    default 48
+
+config SENTRA_PIN_VL53L0X_FWD_XSHUT
+    int "Forward VL53L0X XSHUT GPIO (-1 if tied high)"
+    default 21
+
+config SENTRA_PIN_ACTION_BUTTON
+    int "User action / push-to-talk GPIO (provisional)"
+    default 5
+
+config SENTRA_TOF_SAMPLE_INTERVAL_MS
+    int "VL53L0X sampling interval (ms)"
+    default 250
+    range 50 5000
+
+config SENTRA_IMU_SAMPLE_INTERVAL_MS
+    int "MPU6050 sampling interval (ms)"
+    default 200
+    range 20 5000
+
+config SENTRA_TELEMETRY_INTERVAL_MS
+    int "Telemetry / heartbeat upload interval (ms)"
+    default 2000
+    range 500 15000
+
+config SENTRA_FRAME_UPLOAD_INTERVAL_MS
+    int "OV2640 JPEG frame upload interval (ms)"
+    default 1200
+    range 300 30000
+
+config SENTRA_PROXIMITY_CAUTION_CM
+    int "Experimental forward obstruction caution threshold (cm)"
+    default 100
+    range 25 300
+
+config SENTRA_PROXIMITY_CRITICAL_CM
+    int "Experimental forward obstruction critical threshold (cm)"
+    default 45
+    range 10 150
 
 endmenu

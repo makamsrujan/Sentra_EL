@@ -16,9 +16,10 @@ import {
   Download,
   Camera,
 } from 'lucide-react';
-import type { AnalyticsSummary, DeviceLiveState } from '../types/deviceProtocol';
+import type { AnalyticsSummary, DeviceLiveState, SensorReadingStatus } from '../types/deviceProtocol';
 import { sendSimulatedFrame, sendSimulatedTelemetry } from '../services/deviceApi';
 import { generateDemoRoomDataUrl } from '../utils/demoRoom';
+import { evaluateSensorFusion } from '../utils/sensorFusion';
 
 interface DeviceStatusViewProps {
   devices: DeviceLiveState[];
@@ -48,6 +49,19 @@ function formatDurationMs(ms: number): string {
   return `${s}s`;
 }
 
+function sensorStatusBadgeClasses(status: SensorReadingStatus): string {
+  switch (status) {
+    case 'valid':
+      return 'bg-success/15 text-success border-success/40';
+    case 'stale':
+      return 'bg-amber-500/15 text-amber-400 border-amber-500/40';
+    case 'invalid':
+      return 'bg-destructive/15 text-destructive border-destructive/40';
+    default:
+      return 'bg-secondary text-muted-foreground border-border/60';
+  }
+}
+
 export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
   devices,
   activeDevice,
@@ -68,6 +82,7 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
   const [simForwardCm, setSimForwardCm] = useState(150);
   const [simDownwardMm, setSimDownwardMm] = useState(85);
   const [simBatteryPct, setSimBatteryPct] = useState(80);
+  const [simIncludeDownward, setSimIncludeDownward] = useState(false);
   const [simOperatorToken, setSimOperatorToken] = useState<string>(() => {
     try {
       return sessionStorage.getItem('sentra.operator.token') || '';
@@ -76,11 +91,12 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
     }
   });
   const [simFeedback, setSimFeedback] = useState<string | null>(null);
-  const [analyticsDeviceFilter, setAnalyticsDeviceFilter] = useState<string>('all');
 
   const dev = activeDevice;
   const isConnected = Boolean(dev?.connected);
   const isSimulator = dev?.sourceMode === 'simulator';
+  const fusion = dev ? evaluateSensorFusion(dev) : null;
+  const criticalCm = dev?.runtimeConfig?.proximityCriticalCm ?? 45;
 
   const statusBadge = !dev || !isConnected
     ? { label: 'Disconnected', classes: 'bg-secondary text-muted-foreground border-border', Icon: WifiOff }
@@ -94,12 +110,14 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
     forwardDistanceCm?: number;
     downwardDistanceMm?: number;
     batteryPercent?: number;
+    includeDownward?: boolean;
   }) => {
     const fwd = overrides?.forwardDistanceCm ?? simForwardCm;
-    const down = overrides?.downwardDistanceMm ?? simDownwardMm;
+    const includeDown = overrides?.includeDownward ?? simIncludeDownward;
+    const down = includeDown ? overrides?.downwardDistanceMm ?? simDownwardMm : null;
     const bat = overrides?.batteryPercent ?? simBatteryPct;
     if (overrides?.forwardDistanceCm !== undefined) setSimForwardCm(fwd);
-    if (overrides?.downwardDistanceMm !== undefined) setSimDownwardMm(down);
+    if (overrides?.downwardDistanceMm !== undefined) setSimDownwardMm(overrides.downwardDistanceMm);
     if (overrides?.batteryPercent !== undefined) setSimBatteryPct(bat);
 
     try {
@@ -108,10 +126,26 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
           forwardDistanceCm: fwd,
           downwardDistanceMm: down,
           batteryPercent: bat,
+          headPitchDeg: -4,
+          imu: {
+            ax: 0.05,
+            ay: 0.02,
+            az: 9.81,
+            gx: 0.2,
+            gy: -0.1,
+            gz: 0.0,
+            heading: null,
+            calibrated: true,
+            motionMagnitude: 0.05,
+          },
         },
         simOperatorToken.trim() || undefined
       );
-      setSimFeedback(`Sent simulated packet (Forward: ${fwd} cm, Downward: ${down} mm, Battery: ${bat}%).`);
+      setSimFeedback(
+        `Sent simulated packet (Forward VL53L0X: ${fwd} cm${
+          down !== null ? `, Downward override: ${down} mm` : ''
+        }, Battery: ${bat}%).`
+      );
       onRefreshAnalytics();
     } catch (err: any) {
       setSimFeedback(err?.message || 'Simulator update rejected.');
@@ -144,6 +178,7 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               <h3 className="font-bold text-lg leading-tight">ESP32-S3 Wearable Gateway</h3>
               <p className="text-xs text-muted-foreground font-mono">
                 Stream: {sseConnected ? 'SSE Live' : 'Polling Fallback'}
+                {dev?.firmwareVersion ? ` · FW ${dev.firmwareVersion}` : ''}
                 {dev?.lastHeartbeatAt
                   ? ` · Heartbeat: ${new Date(dev.lastHeartbeatAt).toLocaleTimeString()}`
                   : ' · No heartbeat received'}
@@ -184,13 +219,13 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
 
         {/* Real Sensor Metrics Grid (Nullable when unavailable; zero never shown as clear) */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-          {/* Forward Distance */}
+          {/* Forward Distance (VL53L0X Headband) */}
           <div className="rounded-xl bg-secondary p-3 border border-border/60">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Forward ToF</span>
+              <span>Forward VL53L0X</span>
               {dev?.connected &&
               dev.sensors.forwardDistanceCm !== null &&
-              dev.sensors.forwardDistanceCm < 45 ? (
+              dev.sensors.forwardDistanceCm < criticalCm ? (
                 <AlertTriangle className="h-4 w-4 text-destructive" />
               ) : (
                 <ShieldCheck className="h-4 w-4 text-muted-foreground" />
@@ -200,7 +235,7 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               className={`text-2xl font-bold mt-1 font-mono tabular-nums ${
                 dev?.connected &&
                 dev.sensors.forwardDistanceCm !== null &&
-                dev.sensors.forwardDistanceCm < 45
+                dev.sensors.forwardDistanceCm < criticalCm
                   ? 'text-destructive'
                   : 'text-foreground'
               }`}
@@ -212,50 +247,42 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
             <p className="text-[11px] text-muted-foreground">
               {!dev?.connected
                 ? 'Offline'
+                : fusion
+                ? `Status: ${fusion.forwardStatus} (Alert < ${criticalCm} cm)`
                 : dev.capabilities.forwardToF
-                ? 'Range 2–400 cm'
+                ? `Range 2–400 cm (Alert < ${criticalCm} cm)`
                 : 'Not equipped'}
             </p>
           </div>
 
-          {/* Downward Distance */}
+          {/* GY-521 MPU6050 6-axis IMU */}
           <div className="rounded-xl bg-secondary p-3 border border-border/60">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Downward ToF</span>
-              {dev?.connected &&
-              dev.sensors.downwardDistanceMm !== null &&
-              dev.sensors.downwardDistanceMm > 200 ? (
-                <AlertTriangle className="h-4 w-4 text-destructive" />
-              ) : (
-                <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-              )}
+              <span>MPU6050 IMU</span>
+              <ShieldCheck className="h-4 w-4 text-primary" />
             </div>
-            <p
-              className={`text-2xl font-bold mt-1 font-mono tabular-nums ${
-                dev?.connected &&
-                dev.sensors.downwardDistanceMm !== null &&
-                dev.sensors.downwardDistanceMm > 200
-                  ? 'text-destructive'
-                  : 'text-foreground'
-              }`}
-            >
-              {dev?.connected && dev.capabilities.downwardToF && dev.sensors.downwardDistanceMm !== null
-                ? `${Math.round(dev.sensors.downwardDistanceMm)} mm`
+            <p className="text-xl font-bold text-foreground mt-1 font-mono tabular-nums">
+              {dev?.connected && dev.capabilities.imu && dev.sensors.headPitchDeg !== null
+                ? `${Math.round(dev.sensors.headPitchDeg)}° Pitch`
+                : dev?.connected && dev.capabilities.imu && dev.sensors.imu
+                ? 'Active'
                 : '—'}
             </p>
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-[11px] text-muted-foreground font-mono">
               {!dev?.connected
                 ? 'Offline'
-                : dev.capabilities.downwardToF
-                ? 'Alert > 200 mm'
-                : 'Not equipped'}
+                : !dev.capabilities.imu
+                ? 'Not equipped'
+                : fusion
+                ? `${fusion.imuCalibrated ? 'Calibrated' : 'Uncalibrated'} · 6-axis (No compass)`
+                : '6-axis (No compass)'}
             </p>
           </div>
 
           {/* Battery */}
           <div className="rounded-xl bg-secondary p-3 border border-border/60">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Battery</span>
+              <span>Power / Battery</span>
               {dev?.batteryCharging ? (
                 <BatteryCharging className="h-4 w-4 text-success" />
               ) : (
@@ -268,14 +295,18 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
                 : '—'}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              {dev?.connected ? (dev.batteryPercent !== null ? 'Reported' : 'Unavailable') : 'Offline'}
+              {dev?.connected
+                ? dev.batteryPercent !== null
+                  ? 'Reported'
+                  : '5000mAh USB Bank (No Fuel Gauge)'
+                : 'Offline'}
             </p>
           </div>
 
-          {/* Audio / IMU */}
+          {/* Optional Audio / Downward Depth */}
           <div className="rounded-xl bg-secondary p-3 border border-border/60">
             <div className="flex items-center justify-between text-xs text-muted-foreground">
-              <span>Audio / IMU</span>
+              <span>Optional Modules</span>
               <Headphones className="h-4 w-4 text-accent" />
             </div>
             <p className="text-sm font-bold text-foreground mt-2 font-mono tabular-nums">
@@ -284,36 +315,82 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
                 : dev.capabilities.audioOutput
                 ? dev.earphoneConnected
                   ? `Earphone (${dev.audioVolume ?? '--'}%)`
-                  : 'Audio Disconnected'
-                : 'No Audio Module'}
+                  : 'WM8960 Disconnected'
+                : 'Baseline Headband'}
             </p>
             <p className="text-[11px] text-muted-foreground font-mono">
-              {dev?.connected && dev.capabilities.imu && dev.sensors.imu?.heading != null
-                ? `IMU: ${Math.round(dev.sensors.imu.heading)}°`
-                : 'IMU: Unavailable'}
+              {!dev?.connected
+                ? 'Offline'
+                : dev.capabilities.downwardToF && dev.sensors.downwardDistanceMm !== null
+                ? `Downward: ${Math.round(dev.sensors.downwardDistanceMm)} mm`
+                : dev.capabilities.vl53l5cx
+                ? 'VL53L5CX Equipped'
+                : 'VL53L5CX / WM8960: Not Installed'}
             </p>
           </div>
         </div>
+
+        {/* Sensor Health & Fusion Summary */}
+        {dev && fusion && (
+          <div className="rounded-xl bg-secondary/50 border border-border/60 p-3 space-y-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-bold text-foreground">Sensor Fusion & Health Verification</span>
+              <span className="font-mono text-[11px] text-muted-foreground">
+                Forward Obstruction: <strong className="text-foreground uppercase">{fusion.forwardObstruction}</strong> · Drop-off Sensor:{' '}
+                <strong className="text-foreground">
+                  {fusion.downwardDropOffCapable ? 'Active' : 'Unavailable (Forward-only VL53L0X)'}
+                </strong>
+              </span>
+            </div>
+            <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+              {(
+                [
+                  ['VL53L0X', fusion.forwardStatus],
+                  ['MPU6050', fusion.imuStatus],
+                  ['OV2640', fusion.cameraStatus],
+                  ['VL53L5CX (Opt)', fusion.vl53l5cxStatus],
+                  ['WM8960 (Opt)', fusion.wm8960Status],
+                ] as Array<[string, SensorReadingStatus]>
+              ).map(([name, st]) => (
+                <span
+                  key={name}
+                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-bold ${sensorStatusBadgeClasses(st)}`}
+                >
+                  <span>{name}:</span>
+                  <span className="uppercase">{st}</span>
+                </span>
+              ))}
+              <span className="inline-flex items-center gap-1 rounded border border-border/60 bg-card px-2 py-0.5 text-muted-foreground">
+                <span>SLAM:</span>
+                <span>PLANNED</span>
+              </span>
+            </div>
+            {fusion.advisories.length > 0 && (
+              <p className="text-[11px] text-amber-300 font-mono">{fusion.advisories[0]}</p>
+            )}
+          </div>
+        )}
 
         {/* Reported Hardware Capabilities Row */}
         {dev && (
           <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-border/40 text-xs text-muted-foreground font-mono">
             <span>Capabilities:</span>
-            <span>Camera: {dev.capabilities.camera ? 'Yes' : 'No'}</span>
-            <span>· Forward ToF: {dev.capabilities.forwardToF ? 'Yes' : 'No'}</span>
-            <span>· Downward ToF: {dev.capabilities.downwardToF ? 'Yes' : 'No'}</span>
-            <span>· IMU: {dev.capabilities.imu ? 'Yes' : 'No'}</span>
-            <span>· Audio: {dev.capabilities.audioOutput ? 'Yes' : 'No'}</span>
+            <span>OV2640 Camera: {dev.capabilities.camera ? 'Yes' : 'No'}</span>
+            <span>· Forward VL53L0X: {dev.capabilities.forwardToF ? 'Yes' : 'No'}</span>
+            <span>· MPU6050 IMU: {dev.capabilities.imu ? 'Yes' : 'No'}</span>
+            <span>· VL53L5CX (Opt): {dev.capabilities.vl53l5cx ? 'Yes' : 'No'}</span>
+            <span>· WM8960 (Opt): {dev.capabilities.audioOutput ? 'Yes' : 'No'}</span>
+            <span>· Downward ToF (Opt): {dev.capabilities.downwardToF ? 'Yes' : 'No'}</span>
           </div>
         )}
 
-        {/* WM8960 Headset Audio Subsystem Diagnostics */}
+        {/* WM8960 Headset Audio Subsystem Diagnostics (Optional) */}
         <div className="mt-4 pt-3 border-t border-border/50">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
             <div className="flex items-center gap-2">
               <Headphones className="h-4 w-4 text-primary" />
               <h4 className="text-xs font-bold uppercase tracking-wider text-foreground">
-                WM8960 Headset & Audio Subsystem
+                Audio Output & Optional WM8960 Subsystem
               </h4>
             </div>
             {onChangeAudioOwnership && (
@@ -340,8 +417,10 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
             <div className="rounded-lg bg-secondary/60 p-2.5 border border-border/40 font-mono">
               <div className="flex justify-between items-center text-muted-foreground mb-1">
-                <span>Audio Codec:</span>
-                <span className="text-foreground font-semibold">Waveshare WM8960 Board</span>
+                <span>WM8960 Audio Codec:</span>
+                <span className="text-foreground font-semibold">
+                  {dev?.capabilities.audioOutput ? 'Enabled on Device' : 'Optional / Disabled by Default'}
+                </span>
               </div>
               <div className="flex justify-between items-center text-muted-foreground mb-1">
                 <span>Interface:</span>
@@ -349,37 +428,24 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               </div>
               <div className="flex justify-between items-center text-muted-foreground">
                 <span>Microphone Capture:</span>
-                <span>PCM 16-bit Mono 16 kHz</span>
+                <span>Browser Web Speech (Primary) / PCM 16 kHz</span>
               </div>
             </div>
 
             <div className="rounded-lg bg-secondary/60 p-2.5 border border-border/40 font-mono">
               <div className="flex justify-between items-center text-muted-foreground mb-1">
-                <span>Headset Jack:</span>
-                <span>3.5mm TRRS (CTIA wiring)</span>
+                <span>Headset Output:</span>
+                <span>Browser TTS / Optional 24 kHz WAV</span>
               </div>
               <div className="flex justify-between items-center text-muted-foreground mb-1">
-                <span>Earphone Output:</span>
-                <span>PCM 16-bit Mono 24 kHz</span>
+                <span>Firmware Version:</span>
+                <span>{dev?.firmwareVersion || 'Unreported'}</span>
               </div>
               <div className="flex justify-between items-center text-muted-foreground">
-                <span>Local Sensor Alerts:</span>
-                <span className="text-emerald-400 font-semibold">Autonomous (No Cloud)</span>
+                <span>Local Proximity Cues:</span>
+                <span className="text-emerald-400 font-semibold">Threshold-driven (&lt; {criticalCm} cm)</span>
               </div>
             </div>
-          </div>
-
-          <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] font-mono">
-            <span className="text-muted-foreground">Verification state:</span>
-            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              Code Implemented
-            </span>
-            <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
-              Software-Tested (Vitest)
-            </span>
-            <span className="px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/30">
-              Hardware: Pending ESP32-S3 Flash
-            </span>
           </div>
         </div>
       </div>
@@ -669,26 +735,26 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => pushSimTelemetry({ forwardDistanceCm: 28 })}
+                onClick={() => pushSimTelemetry({ forwardDistanceCm: 28, includeDownward: false })}
                 className="rounded-lg bg-destructive/15 text-destructive border border-destructive/40 px-3 py-1.5 text-xs font-bold"
               >
                 Sim Proximity (28 cm)
               </button>
               <button
                 type="button"
-                onClick={() => pushSimTelemetry({ downwardDistanceMm: 350 })}
+                onClick={() => pushSimTelemetry({ downwardDistanceMm: 350, includeDownward: true })}
                 className="rounded-lg bg-destructive/15 text-destructive border border-destructive/40 px-3 py-1.5 text-xs font-bold"
               >
-                Sim Drop-Off (350 mm)
+                Sim Optional Drop-Off (350 mm)
               </button>
               <button
                 type="button"
                 onClick={() =>
-                  pushSimTelemetry({ forwardDistanceCm: 150, downwardDistanceMm: 85, batteryPercent: 80 })
+                  pushSimTelemetry({ forwardDistanceCm: 150, batteryPercent: 80, includeDownward: false })
                 }
                 className="rounded-lg bg-secondary text-foreground border border-border px-3 py-1.5 text-xs font-bold"
               >
-                Send Normal Packet
+                Send Baseline Packet
               </button>
               <button
                 type="button"
@@ -700,10 +766,20 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               </button>
             </div>
 
+            <label className="inline-flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+              <input
+                type="checkbox"
+                checked={simIncludeDownward}
+                onChange={(e) => setSimIncludeDownward(e.target.checked)}
+                className="accent-accent"
+              />
+              <span>Include optional downward reading (not on baseline hardware)</span>
+            </label>
+
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
               <div className="space-y-1">
                 <div className="flex justify-between font-mono">
-                  <span>Forward (cm):</span>
+                  <span>Forward VL53L0X (cm):</span>
                   <span>{simForwardCm}</span>
                 </div>
                 <input
@@ -717,16 +793,17 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               </div>
               <div className="space-y-1">
                 <div className="flex justify-between font-mono">
-                  <span>Downward (mm):</span>
-                  <span>{simDownwardMm}</span>
+                  <span>Optional Downward (mm):</span>
+                  <span>{simIncludeDownward ? simDownwardMm : 'disabled'}</span>
                 </div>
                 <input
                   type="range"
                   min={40}
                   max={500}
+                  disabled={!simIncludeDownward}
                   value={simDownwardMm}
                   onChange={(e) => setSimDownwardMm(Number(e.target.value))}
-                  className="w-full accent-accent"
+                  className="w-full accent-accent disabled:opacity-40"
                 />
               </div>
               <div className="space-y-1">

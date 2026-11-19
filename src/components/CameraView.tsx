@@ -507,7 +507,7 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
               </div>
             </div>
           ) : cameraSource === 'esp32_camera' ? (
-            /* 2. Wearable ESP32-S3 JPEG Stream */
+            /* 2. Wearable ESP32-S3 OV2640 JPEG Stream */
             wearableFrames.imageUrl ? (
               <div className="relative h-full w-full bg-slate-950">
                 <img
@@ -525,14 +525,21 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                   }}
                   className={`h-full w-full object-cover ${wearableFrames.isStale ? 'opacity-65 grayscale-[30%]' : ''}`}
                 />
-                <div className="absolute top-3 left-3 z-20 flex items-center gap-2 rounded-lg bg-background/90 border border-border px-2.5 py-1 text-xs font-mono tabular-nums">
+                <div className="absolute top-3 left-3 z-20 flex flex-wrap items-center gap-2 rounded-lg bg-background/90 border border-border px-2.5 py-1 text-xs font-mono tabular-nums">
                   <Cpu className="h-3.5 w-3.5 text-primary" />
                   <span>
-                    {wearableDeviceId} · Seq #{wearableFrames.sequence ?? '—'}
+                    {wearableDeviceId} · OV2640 · Seq #{wearableFrames.sequence ?? '—'}
+                    {wearableFrames.dimensions
+                      ? ` · ${wearableFrames.dimensions.width}×${wearableFrames.dimensions.height}`
+                      : ''}
                   </span>
-                  {wearableFrames.isStale && (
+                  {wearableFrames.isStale ? (
                     <span className="text-destructive font-bold">
-                      · STALE ({wearableFrames.frameAgeMs ? Math.round(wearableFrames.frameAgeMs / 1000) : '?'}s)
+                      · STALE ({wearableFrames.frameAgeMs ? Math.round(wearableFrames.frameAgeMs / 1000) : '?'}s) — NOT LIVE
+                    </span>
+                  ) : (
+                    <span className="text-success font-bold">
+                      · LIVE ({wearableFrames.frameAgeMs !== null ? `${Math.round(wearableFrames.frameAgeMs)}ms` : '0ms'})
                     </span>
                   )}
                 </div>
@@ -546,8 +553,9 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                     : 'Waiting for Wearable JPEG Frames'}
                 </p>
                 <p className="text-xs max-w-sm">
-                  Listening for authenticated JPEG frames on <span className="font-mono">POST /api/device/frame</span> for{' '}
-                  <span className="font-mono text-foreground">{wearableDeviceId}</span>.
+                  Listening for authenticated headband OV2640 JPEG frames on{' '}
+                  <span className="font-mono">POST /api/device/frame</span> for{' '}
+                  <span className="font-mono text-foreground">{wearableDeviceId}</span>. Forward-only baseline VL53L0X (no downward drop-off sensor).
                 </p>
                 {wearableFrames.errorMessage && (
                   <p className="text-xs text-destructive font-mono">{wearableFrames.errorMessage}</p>

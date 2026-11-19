@@ -1,0 +1,322 @@
+{
+  "entities": {
+    "UserSettings": {
+      "title": "UserSettings",
+      "description": "Non-PII accessibility preferences, speech settings, and active wearable device selection for a SENTRA user.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the account owner."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Display name shown in the signed-in profile header."
+        },
+        "speechRate": {
+          "type": "number",
+          "description": "Preferred speech output rate (0.75 to 1.6)."
+        },
+        "voiceVolume": {
+          "type": "number",
+          "description": "Preferred speech output volume (0 to 1)."
+        },
+        "voiceMuted": {
+          "type": "boolean",
+          "description": "Whether spoken audio feedback is muted."
+        },
+        "audioFeedback": {
+          "type": "boolean",
+          "description": "Whether auditory chimes are enabled."
+        },
+        "reachGuidanceEnabled": {
+          "type": "boolean",
+          "description": "Whether arm-reach tactile guidance cues are enabled."
+        },
+        "preferredVoiceName": {
+          "type": "string",
+          "enum": ["Zephyr", "Puck", "Charon", "Kore", "Fenrir"],
+          "description": "Gemini Live API prebuilt voice persona."
+        },
+        "selectedWearableDeviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Default ESP32-S3 wearable device ID."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "speechRate",
+        "voiceVolume",
+        "voiceMuted",
+        "audioFeedback",
+        "reachGuidanceEnabled",
+        "preferredVoiceName",
+        "selectedWearableDeviceId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateProfile": {
+      "title": "UserPrivateProfile",
+      "description": "Strictly owner-isolated PII record containing user email and auth metadata.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the owner."
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 160,
+          "description": "Verified account email address."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "MemoryRecord": {
+      "title": "MemoryRecord",
+      "description": "User-saved contextual spatial memory synchronized across sessions and devices.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "description": "Object or place name."
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000,
+          "description": "Contextual placement note."
+        },
+        "room": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Room or zone label."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["live_verified", "remembered_historical", "user_manual"],
+          "description": "Evidence source of the memory."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": ["userId", "label", "note", "room", "source", "createdAt", "updatedAt"]
+    },
+    "WearableDeviceProfile": {
+      "title": "WearableDeviceProfile",
+      "description": "Paired ESP32-S3 wearable hardware configuration and capability record owned by a user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "ESP32-S3 device identifier."
+        },
+        "friendlyName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "Friendly label for the paired unit."
+        },
+        "firmwareVersion": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Reported firmware version string."
+        },
+        "frameSize": {
+          "type": "string",
+          "enum": ["QVGA", "VGA", "SVGA"],
+          "description": "OV2640 JPEG frame resolution."
+        },
+        "jpegQuality": {
+          "type": "number",
+          "description": "OV2640 compression quality (4-63)."
+        },
+        "tofSampleIntervalMs": {
+          "type": "number",
+          "description": "VL53L0X sampling interval in milliseconds."
+        },
+        "proximityCriticalCm": {
+          "type": "number",
+          "description": "Forward obstruction alert threshold in cm."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "deviceId",
+        "friendlyName",
+        "firmwareVersion",
+        "frameSize",
+        "jpegQuality",
+        "tofSampleIntervalMs",
+        "proximityCriticalCm",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "VoiceConversationLog": {
+      "title": "VoiceConversationLog",
+      "description": "Persisted Gemini 3.8 Live voice conversation turn with grounded hardware telemetry context.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "deviceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Associated wearable device ID or browser."
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Live model used for the turn."
+        },
+        "userTranscript": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 2000,
+          "description": "Transcribed spoken input from the user."
+        },
+        "assistantTranscript": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "Transcribed spoken response from SENTRA."
+        },
+        "forwardDistanceCm": {
+          "type": "number",
+          "description": "VL53L0X forward distance reading at the time of turn (-1 when unavailable)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "completed"],
+          "description": "Conversation turn lifecycle state."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server update timestamp."
+        }
+      },
+      "required": [
+        "userId",
+        "deviceId",
+        "model",
+        "userTranscript",
+        "assistantTranscript",
+        "forwardDistanceCm",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserSettings" },
+      "description": "User accessibility preferences and active wearable pairing."
+    },
+    "/users/{userId}/private/{profileDocId}": {
+      "schema": { "$ref": "#/entities/UserPrivateProfile" },
+      "description": "PII-isolated private profile document (profileDocId = 'profile')."
+    },
+    "/memories/{memoryId}": {
+      "schema": { "$ref": "#/entities/MemoryRecord" },
+      "description": "User-owned contextual memories synced across browser and wearable sessions."
+    },
+    "/wearableDevices/{deviceId}": {
+      "schema": { "$ref": "#/entities/WearableDeviceProfile" },
+      "description": "User-owned ESP32-S3 wearable device profiles and thresholds."
+    },
+    "/conversations/{sessionId}": {
+      "schema": { "$ref": "#/entities/VoiceConversationLog" },
+      "description": "Live Gemini voice conversation history grounded with hardware telemetry."
+    }
+  }
+}

@@ -74,6 +74,19 @@ export interface DeviceCapabilities {
   downwardToF: boolean;
   imu: boolean;
   audioOutput: boolean;
+  vl53l5cx?: boolean;
+}
+
+export type SensorReadingStatus = 'valid' | 'invalid' | 'stale' | 'unavailable';
+
+export interface SensorHealthReport {
+  forwardToF: SensorReadingStatus;
+  downwardToF: SensorReadingStatus;
+  imu: SensorReadingStatus;
+  imuCalibrated: boolean;
+  camera: SensorReadingStatus;
+  vl53l5cx: SensorReadingStatus;
+  wm8960: SensorReadingStatus;
 }
 
 export interface ImuReading {
@@ -84,6 +97,14 @@ export interface ImuReading {
   gy: number;
   gz: number;
   heading: number | null;
+  calibrated?: boolean;
+  motionMagnitude?: number | null;
+}
+
+export interface Vl53l5cxZoneReading {
+  available: boolean;
+  validZones: number;
+  minDistanceMm: number | null;
 }
 
 export interface TelemetryPayloadV1 {
@@ -91,6 +112,7 @@ export interface TelemetryPayloadV1 {
   deviceId: string;
   sequence: number;
   uptimeMs: number;
+  firmwareVersion?: string | null;
   batteryPercent: number | null;
   batteryCharging?: boolean | null;
   earphoneConnected?: boolean | null;
@@ -102,13 +124,36 @@ export interface TelemetryPayloadV1 {
     downwardDistanceMm: number | null;
     headPitchDeg?: number | null;
     imu: ImuReading | null;
+    vl53l5cx?: Vl53l5cxZoneReading | null;
   };
+  sensorHealth?: Partial<SensorHealthReport>;
+  diagnostics?: string | null;
   capabilities: DeviceCapabilities;
 }
+
+export interface DeviceRuntimeConfig {
+  tofSampleIntervalMs: number;
+  imuSampleIntervalMs: number;
+  frameUploadIntervalMs: number;
+  jpegQuality: number;
+  frameSize: 'QVGA' | 'VGA' | 'SVGA';
+  proximityCautionCm: number;
+  proximityCriticalCm: number;
+  sensorStaleMs: number;
+  alertCooldownMs: number;
+}
+
+export type DeviceCommandType =
+  | 'CAPTURE_FRAME'
+  | 'REQUEST_OBSERVATION'
+  | 'RECALIBRATE_IMU'
+  | 'CONFIG_UPDATE'
+  | 'SPEAK_ALERT';
 
 export interface DeviceLiveState {
   deviceId: string;
   name: string;
+  firmwareVersion: string | null;
   sourceMode: DeviceSourceMode;
   connected: boolean;
   lastHeartbeatAt: number | null;
@@ -126,8 +171,12 @@ export interface DeviceLiveState {
     downwardDistanceMm: number | null;
     headPitchDeg: number | null;
     imu: ImuReading | null;
+    vl53l5cx: Vl53l5cxZoneReading | null;
   };
+  sensorHealth: SensorHealthReport;
+  diagnostics: string | null;
   capabilities: DeviceCapabilities;
+  runtimeConfig: DeviceRuntimeConfig;
   frameAvailable: boolean;
   frameSequence: number | null;
   frameTimestamp: number | null;
@@ -153,16 +202,52 @@ export interface WearableFrameStatus {
 export interface WearableActionItem {
   id: string;
   deviceId: string;
-  type: 'speech' | 'proximity_alert' | 'active_perception';
+  type:
+    | 'speech'
+    | 'proximity_alert'
+    | 'active_perception'
+    | 'capture_frame'
+    | 'recalibrate_imu'
+    | 'config_update';
   text: string;
   priority: 'normal' | 'critical';
   createdAt: number;
   acknowledgedAt: number | null;
+  payload?: Record<string, unknown> | null;
   audioReplyId?: string | null;
   audioUrl?: string | null;
   audioFormat?: 'wav' | null;
   audioDurationMs?: number | null;
   deliveryMode?: 'direct_response' | 'poll_queue';
+}
+
+export interface SensorFusionSummary {
+  evaluatedAt: number;
+  deviceConnected: boolean;
+  sourceMode: DeviceSourceMode;
+  forwardStatus: SensorReadingStatus;
+  forwardDistanceCm: number | null;
+  imuStatus: SensorReadingStatus;
+  imuCalibrated: boolean;
+  headPitchDeg: number | null;
+  headMotionLevel: 'steady' | 'moving' | 'rapid' | 'unavailable';
+  cameraStatus: SensorReadingStatus;
+  vl53l5cxStatus: SensorReadingStatus;
+  wm8960Status: SensorReadingStatus;
+  downwardDropOffCapable: boolean;
+  forwardObstruction: 'none_detected' | 'caution' | 'critical' | 'unknown';
+  summaryText: string;
+  advisories: string[];
+}
+
+export interface SlamPoseContractPlaceholder {
+  status: 'planned';
+  note: string;
+  xMeters: null;
+  yMeters: null;
+  zMeters: null;
+  yawDeg: null;
+  frameTimestamp: number | null;
 }
 
 export interface RegisteredDeviceSummary {

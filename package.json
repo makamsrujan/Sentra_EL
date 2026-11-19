@@ -13,13 +13,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@firebase/eslint-plugin-security-rules": "^0.0.2",
     "@google/genai": "^2.32.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/d3": "^7.4.3",
+    "@types/ws": "^8.18.2",
     "@vitejs/plugin-react": "^6.1.1",
     "d3": "^7.9.2",
     "dotenv": "^17.2.3",
+    "eslint": "^10.15.0",
     "express": "^4.21.2",
+    "firebase": "^13.4.0",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
     "react": "^19.0.1",
@@ -27,6 +31,7 @@
     "vite": "^8.3.0",
     "vite-plugin-pwa": "^2.0.0",
     "vitest": "^5.1.1",
+    "ws": "^8.23.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {

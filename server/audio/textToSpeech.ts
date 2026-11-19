@@ -66,11 +66,18 @@ export async function synthesizeSpeechWav(
     options?.model ||
     process.env.GEMINI_TTS_MODEL ||
     process.env.GEMINI_MODEL ||
-    'gemini-2.5-flash';
+    'gemini-3.8-flash-lite-tts';
   const voiceName = options?.voiceName || process.env.SENTRA_TTS_VOICE || 'Puck';
 
   try {
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build',
+        },
+      },
+    });
 
     // Request audio modality from multimodal Gemini
     const response = await ai.models.generateContent({
@@ -147,7 +154,7 @@ export async function synthesizeSpeechWav(
       };
     }
 
-    const validation = validateWavBuffer(finalWavBuffer);
+    const validation = validateWavBuffer(finalWavBuffer, { expectedSampleRate: sampleRate });
     if (!validation.valid) {
       return {
         ok: false,

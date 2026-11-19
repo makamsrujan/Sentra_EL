@@ -17,15 +17,23 @@ import {
   Smartphone,
   Sparkles,
   Square,
+  Database,
+  LogIn,
+  LogOut,
 } from 'lucide-react';
+import { useFirebase } from '../contexts/FirebaseContext';
 import { GeminiDiagnosticResult, SentraSettings, SystemHealthStatus } from '../types/sentra';
-import { DeviceLiveState } from '../types/deviceProtocol';
+import type { DeviceLiveState, DeviceRuntimeConfig } from '../types/deviceProtocol';
 import { speakText } from '../utils/audio';
+import { evaluateSensorFusion, DEFAULT_DEVICE_RUNTIME_CONFIG } from '../utils/sensorFusion';
 import {
   clearStoredTelemetryEvents,
+  fetchDeviceConfig,
   fetchHealthStatus,
   registerHardwareDevice,
   runGeminiDiagnostic,
+  sendDeviceCommand,
+  updateDeviceConfig,
 } from '../services/deviceApi';
 import type { BrowserCameraErrorType, BrowserCameraStatus } from '../hooks/useCamera';
 import type { VoiceAssistantState, VoiceCompatibilityInfo } from '../hooks/useVoiceAssistant';
@@ -82,6 +90,7 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   onRestartMicrophone,
   onDeviceRegistered,
 }) => {
+  const firebase = useFirebase();
   const [health, setHealth] = useState<SystemHealthStatus | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
@@ -98,15 +107,16 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
     }
   });
 
-  // Hardware Device Registration Form
+  // Hardware Device Registration Form (Aligned to Physical Baseline Hardware)
   const [regDeviceId, setRegDeviceId] = useState('ESP32-S3-SENTRA-001');
   const [regName, setRegName] = useState('SENTRA Headband Unit');
   const [regCaps, setRegCaps] = useState({
     camera: true,
     forwardToF: true,
     downwardToF: false,
-    imu: false,
+    imu: true,
     audioOutput: false,
+    vl53l5cx: false,
   });
   const [provisionedResult, setProvisionedResult] = useState<{
     deviceId: string;
@@ -115,6 +125,14 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   const [regError, setRegError] = useState<string | null>(null);
   const [confirmClearEvents, setConfirmClearEvents] = useState(false);
   const [clearEventsError, setClearEventsError] = useState<string | null>(null);
+
+  // Wearable Runtime Configuration & Remote Commands
+  const [runtimeConfig, setRuntimeConfig] = useState<DeviceRuntimeConfig>(
+    activeDevice?.runtimeConfig || DEFAULT_DEVICE_RUNTIME_CONFIG
+  );
+  const [configStatus, setConfigStatus] = useState<string | null>(null);
+  const [savingConfig, setSavingConfig] = useState(false);
+  const [commandStatus, setCommandStatus] = useState<string | null>(null);
 
   const handleOperatorTokenChange = (val: string) => {
     setOperatorToken(val);
@@ -154,6 +172,63 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   useEffect(() => {
     runDiagnosticsRefresh();
   }, [runDiagnosticsRefresh]);
+
+  useEffect(() => {
+    const targetId = activeDevice?.deviceId || settings.selectedWearableDeviceId;
+    if (!targetId) return;
+    fetchDeviceConfig(targetId)
+      .then((res) => setRuntimeConfig(res.config))
+      .catch(() => {});
+  }, [activeDevice?.deviceId, settings.selectedWearableDeviceId]);
+
+  const handleSaveRuntimeConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetId = activeDevice?.deviceId || settings.selectedWearableDeviceId;
+    setSavingConfig(true);
+    setConfigStatus(null);
+    try {
+      const res = await updateDeviceConfig({
+        deviceId: targetId,
+        config: runtimeConfig,
+        operatorToken: operatorToken.trim() || undefined,
+      });
+      setRuntimeConfig(res.config);
+      if (firebase.user) {
+        await firebase
+          .saveWearableProfile({
+            deviceId: res.deviceId,
+            friendlyName: activeDevice?.name || res.deviceId,
+            firmwareVersion: activeDevice?.firmwareVersion,
+            runtimeConfig: res.config,
+          })
+          .catch(() => {});
+      }
+      setConfigStatus(
+        `Saved & queued config_update (${res.queuedActionId || 'synced'}) for ${res.deviceId}.`
+      );
+    } catch (err: any) {
+      setConfigStatus(err?.message || 'Failed to save runtime configuration.');
+    } finally {
+      setSavingConfig(false);
+    }
+  };
+
+  const handleTriggerDeviceCommand = async (
+    type: 'CAPTURE_FRAME' | 'RECALIBRATE_IMU' | 'REQUEST_OBSERVATION'
+  ) => {
+    const targetId = activeDevice?.deviceId || settings.selectedWearableDeviceId;
+    setCommandStatus(null);
+    try {
+      const res = await sendDeviceCommand({
+        deviceId: targetId,
+        type,
+        operatorToken: operatorToken.trim() || undefined,
+      });
+      setCommandStatus(`Queued ${res.action.type} (${res.action.id}) for ${res.deviceId}.`);
+    } catch (err: any) {
+      setCommandStatus(err?.message || `Failed to queue ${type}`);
+    }
+  };
 
   const speechRecSupported =
     typeof window !== 'undefined' &&
@@ -207,6 +282,99 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
     voiceState !== 'error' &&
     voiceState !== 'permission_blocked' &&
     voiceState !== 'unsupported';
+
+  const fusion = activeDevice ? evaluateSensorFusion(activeDevice) : null;
+
+  const readinessChecklist: Array<{
+    step: string;
+    state: 'pass' | 'warn' | 'fail';
+    evidence: string;
+  }> = [
+    {
+      step: '1. Backend & SQLite Ready',
+      state: health && health.databaseAvailable ? 'pass' : 'fail',
+      evidence: health?.databaseAvailable ? 'Express + SQLite WAL online' : 'Backend/DB check incomplete',
+    },
+    {
+      step: '2. Operator & Device Auth',
+      state: health?.operatorAuthConfigured ? 'pass' : 'warn',
+      evidence: health?.operatorAuthConfigured
+        ? 'SENTRA_OPERATOR_TOKEN configured'
+        : 'Set SENTRA_OPERATOR_TOKEN to provision physical units',
+    },
+    {
+      step: '3. Physical ESP32-S3 Connected',
+      state:
+        activeDevice?.sourceMode === 'hardware' && activeDevice.connected
+          ? 'pass'
+          : activeDevice?.sourceMode === 'simulator' && activeDevice.connected
+          ? 'warn'
+          : 'fail',
+      evidence:
+        activeDevice?.sourceMode === 'hardware' && activeDevice.connected
+          ? `${activeDevice.deviceId} (${activeDevice.firmwareVersion || 'fw unknown'})`
+          : activeDevice?.sourceMode === 'simulator'
+          ? 'Simulator active (physical hardware not connected)'
+          : 'No ESP32-S3 device connected',
+    },
+    {
+      step: '4. OV2640 Camera & Fresh Frames',
+      state:
+        cameraDiagnostics?.wearableConnected &&
+        cameraDiagnostics.wearableFrameAgeMs !== null &&
+        !cameraDiagnostics.wearableFrameStale
+          ? 'pass'
+          : cameraDiagnostics?.wearableConnected
+          ? 'warn'
+          : 'fail',
+      evidence:
+        cameraDiagnostics?.wearableFrameAgeMs != null
+          ? `Age ${Math.round(cameraDiagnostics.wearableFrameAgeMs)} ms (${
+              cameraDiagnostics.wearableFrameStale ? 'stale' : 'live'
+            })`
+          : 'No wearable JPEG frames uploaded',
+    },
+    {
+      step: '5. Single Forward VL53L0X ToF',
+      state: fusion?.forwardStatus === 'valid' ? 'pass' : fusion ? 'warn' : 'fail',
+      evidence: fusion
+        ? `${fusion.forwardStatus} (${
+            fusion.forwardDistanceCm !== null ? `${Math.round(fusion.forwardDistanceCm)} cm` : 'null'
+          })`
+        : 'Device offline',
+    },
+    {
+      step: '6. GY-521 MPU6050 IMU & Calibration',
+      state:
+        fusion?.imuStatus === 'valid' && fusion.imuCalibrated
+          ? 'pass'
+          : fusion?.imuStatus === 'valid'
+          ? 'warn'
+          : 'fail',
+      evidence: fusion
+        ? `${fusion.imuStatus}, ${fusion.imuCalibrated ? 'calibrated' : 'uncalibrated'}, pitch ${
+            fusion.headPitchDeg !== null ? `${Math.round(fusion.headPitchDeg)}°` : 'N/A'
+          }`
+        : 'Device offline',
+    },
+    {
+      step: '7. Optional Modules Isolated (VL53L5CX / WM8960)',
+      state: 'pass',
+      evidence: `VL53L5CX: ${activeDevice?.capabilities.vl53l5cx ? 'enabled' : 'disabled/optional'} · WM8960: ${
+        activeDevice?.capabilities.audioOutput ? 'enabled' : 'disabled/optional'
+      }`,
+    },
+    {
+      step: '8. Gemini Model & Vision API',
+      state: geminiVerifiedHealthy ? 'pass' : health?.hasApiKey ? 'warn' : 'fail',
+      evidence: geminiDetail,
+    },
+    {
+      step: '9. "Hey SENTRA" & Voice Output',
+      state: voiceHealthy ? 'pass' : 'warn',
+      evidence: voiceError ? voiceError : `${voiceState} · ${voiceCompatibility.modeSummary}`,
+    },
+  ];
 
   const diagnosticRows = [
     {
@@ -269,6 +437,24 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
           : 'No real ESP32-S3 hardware connected',
     },
     {
+      label: 'Gemini 3.8 Live Real-Time Voice (WS /api/live/voice)',
+      healthy: Boolean(health?.hasApiKey),
+      detail: health?.hasApiKey
+        ? `Ready · Live Model: ${health.liveModel || 'gemini-3.8-live'} · 16 kHz / 24 kHz PCM`
+        : 'Missing GEMINI_API_KEY on server for Live API sessions',
+    },
+    {
+      label: 'Firebase Auth & Cloud Firestore Sync',
+      healthy: Boolean(firebase.firestoreOnline && firebase.user && !firebase.authError),
+      detail: firebase.authError
+        ? `Firebase Error: ${firebase.authError}`
+        : !firebase.firestoreOnline
+        ? 'Firestore offline — check Firebase configuration'
+        : firebase.user
+        ? `Signed in as ${firebase.user.displayName || firebase.user.email || firebase.user.uid} · Memories: ${firebase.firestoreMemories.length}`
+        : 'Firestore online · Sign in with Google to sync profile, memories & hardware thresholds',
+    },
+    {
       label: 'Voice Wake Word & Speech Engine',
       healthy: voiceHealthy,
       detail: voiceError
@@ -305,6 +491,30 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
               <RefreshCw className={`h-3.5 w-3.5 ${checkingHealth ? 'animate-spin' : ''}`} />
               <span>Re-check Health</span>
             </button>
+            {firebase.user ? (
+              <button
+                type="button"
+                onClick={() => {
+                  void firebase.signOut();
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold hover:border-primary"
+              >
+                <LogOut className="h-3.5 w-3.5 text-primary" />
+                <span>Sign Out ({firebase.user.displayName?.split(' ')[0] || 'Google'})</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => {
+                  void firebase.signIn();
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold hover:border-primary"
+              >
+                <LogIn className="h-3.5 w-3.5 text-primary" />
+                <Database className="h-3.5 w-3.5 text-accent" />
+                <span>Sign In to Sync</span>
+              </button>
+            )}
           </div>
         </div>
 
@@ -632,11 +842,12 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
           <div className="flex flex-wrap gap-3 text-xs">
             {(
               [
-                ['camera', 'Camera'],
-                ['forwardToF', 'Forward ToF'],
-                ['downwardToF', 'Downward ToF'],
-                ['imu', 'IMU'],
-                ['audioOutput', 'Audio Output'],
+                ['camera', 'OV2640 Camera'],
+                ['forwardToF', 'Forward VL53L0X'],
+                ['imu', 'MPU6050 6-axis IMU'],
+                ['downwardToF', 'Downward ToF (Opt)'],
+                ['vl53l5cx', 'VL53L5CX Depth (Opt)'],
+                ['audioOutput', 'WM8960 Audio (Opt)'],
               ] as const
             ).map(([key, label]) => (
               <label key={key} className="inline-flex items-center gap-1.5 cursor-pointer">
@@ -675,6 +886,176 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
             </p>
           </div>
         )}
+      </div>
+
+      {/* Hardware Integration Readiness Checklist & Wearable Tuning */}
+      <div className="rounded-xl bg-card border border-border p-4 space-y-4">
+        <div className="flex items-center gap-2 font-bold text-base text-foreground">
+          <ShieldCheck className="h-5 w-5 text-accent" />
+          <span>Hardware Integration Readiness Checklist</span>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+          {readinessChecklist.map((item) => (
+            <div
+              key={item.step}
+              className="rounded-lg bg-secondary/50 border border-border/60 p-2.5 flex items-start justify-between gap-2"
+            >
+              <div className="min-w-0">
+                <p className="font-bold text-foreground">{item.step}</p>
+                <p className="text-[11px] font-mono text-muted-foreground break-words">{item.evidence}</p>
+              </div>
+              <span
+                className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-mono font-bold uppercase ${
+                  item.state === 'pass'
+                    ? 'bg-success/15 text-success border border-success/40'
+                    : item.state === 'warn'
+                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/40'
+                    : 'bg-destructive/15 text-destructive border border-destructive/40'
+                }`}
+              >
+                {item.state}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        {/* Remote Wearable Configuration & Commands */}
+        <div className="pt-3 border-t border-border/50 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="text-xs font-bold uppercase tracking-wider text-foreground">
+              Wearable Runtime Config & Remote Commands ({activeDevice?.deviceId || settings.selectedWearableDeviceId})
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  ['CAPTURE_FRAME', 'Trigger Camera Snapshot'],
+                  ['RECALIBRATE_IMU', 'Recalibrate MPU6050'],
+                  ['REQUEST_OBSERVATION', 'Request Active Observation'],
+                ] as const
+              ).map(([cmd, label]) => (
+                <button
+                  key={cmd}
+                  type="button"
+                  onClick={() => handleTriggerDeviceCommand(cmd)}
+                  className="rounded-lg bg-secondary border border-border px-2.5 py-1 text-[11px] font-bold hover:border-primary"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {commandStatus && (
+            <p className="text-xs font-mono text-primary">{commandStatus}</p>
+          )}
+
+          <form onSubmit={handleSaveRuntimeConfig} className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+            <label className="space-y-1">
+              <span className="text-muted-foreground font-mono">VL53L0X Poll (ms)</span>
+              <input
+                type="number"
+                min={50}
+                max={5000}
+                step={50}
+                value={runtimeConfig.tofSampleIntervalMs}
+                onChange={(e) =>
+                  setRuntimeConfig({ ...runtimeConfig, tofSampleIntervalMs: Number(e.target.value) })
+                }
+                className="w-full rounded-lg bg-secondary border border-border px-2.5 py-1.5 font-mono text-foreground"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted-foreground font-mono">Camera Upload (ms)</span>
+              <input
+                type="number"
+                min={250}
+                max={30000}
+                step={100}
+                value={runtimeConfig.frameUploadIntervalMs}
+                onChange={(e) =>
+                  setRuntimeConfig({ ...runtimeConfig, frameUploadIntervalMs: Number(e.target.value) })
+                }
+                className="w-full rounded-lg bg-secondary border border-border px-2.5 py-1.5 font-mono text-foreground"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted-foreground font-mono">JPEG Quality (4-63)</span>
+              <input
+                type="number"
+                min={4}
+                max={63}
+                value={runtimeConfig.jpegQuality}
+                onChange={(e) =>
+                  setRuntimeConfig({ ...runtimeConfig, jpegQuality: Number(e.target.value) })
+                }
+                className="w-full rounded-lg bg-secondary border border-border px-2.5 py-1.5 font-mono text-foreground"
+              />
+            </label>
+            <label className="space-y-1">
+              <span className="text-muted-foreground font-mono">Alert Threshold (cm)</span>
+              <input
+                type="number"
+                min={10}
+                max={150}
+                value={runtimeConfig.proximityCriticalCm}
+                onChange={(e) =>
+                  setRuntimeConfig({ ...runtimeConfig, proximityCriticalCm: Number(e.target.value) })
+                }
+                className="w-full rounded-lg bg-secondary border border-border px-2.5 py-1.5 font-mono text-foreground"
+              />
+            </label>
+
+            <div className="col-span-2 sm:col-span-4 flex flex-wrap items-center justify-between gap-2 pt-1">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="inline-flex items-center gap-1.5 font-mono">
+                  <span>Resolution:</span>
+                  <select
+                    value={runtimeConfig.frameSize}
+                    onChange={(e) =>
+                      setRuntimeConfig({
+                        ...runtimeConfig,
+                        frameSize: e.target.value as DeviceRuntimeConfig['frameSize'],
+                      })
+                    }
+                    className="rounded bg-secondary border border-border px-2 py-1 text-foreground"
+                  >
+                    <option value="QVGA">QVGA (320×240)</option>
+                    <option value="VGA">VGA (640×480)</option>
+                    <option value="SVGA">SVGA (800×600)</option>
+                  </select>
+                </label>
+
+                <label className="inline-flex items-center gap-1.5 font-mono">
+                  <span>Stale Window (ms):</span>
+                  <input
+                    type="number"
+                    min={1000}
+                    max={60000}
+                    step={500}
+                    value={runtimeConfig.sensorStaleMs}
+                    onChange={(e) =>
+                      setRuntimeConfig({ ...runtimeConfig, sensorStaleMs: Number(e.target.value) })
+                    }
+                    className="w-24 rounded bg-secondary border border-border px-2 py-1 text-foreground"
+                  />
+                </label>
+              </div>
+
+              <button
+                type="submit"
+                disabled={savingConfig}
+                className="rounded-lg bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground disabled:opacity-50"
+              >
+                {savingConfig ? 'Saving…' : 'Push Config to Device'}
+              </button>
+            </div>
+          </form>
+
+          {configStatus && (
+            <p className="text-xs font-mono text-muted-foreground">{configStatus}</p>
+          )}
+        </div>
       </div>
 
       {/* Stored Event Management */}

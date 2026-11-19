@@ -207,6 +207,7 @@ export interface AnalysisResponseData {
   modelUsed?: string | null;
   fallbackUsed?: boolean;
   frameTimestamp?: number | null;
+  sensorFusion?: import('./deviceProtocol').SensorFusionSummary | null;
   timestamp: number;
 }
 
@@ -237,6 +238,7 @@ export interface SystemHealthStatus {
   modelConfigValid: boolean;
   modelConfigError: string | null;
   supportedModels: string[];
+  liveModel?: string;
   lastWorkingModel: string | null;
   operatorAuthConfigured: boolean;
   simulatorEnabled: boolean;

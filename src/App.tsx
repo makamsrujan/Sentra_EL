@@ -47,7 +47,11 @@ import {
   createMemory,
   deleteMemory,
   fetchMemories,
+  updateAudioOwnership,
 } from './services/deviceApi';
+import { useFirebase } from './contexts/FirebaseContext';
+import { useGeminiLiveVoice } from './hooks/useGeminiLiveVoice';
+import type { LiveVoiceName } from './lib/firebase';
 import {
   Mic,
   MicOff,
@@ -71,6 +75,11 @@ import {
   Menu,
   RefreshCw,
   X,
+  PhoneCall,
+  PhoneOff,
+  LogIn,
+  LogOut,
+  User as UserIcon,
 } from 'lucide-react';
 
 const STATS_STORAGE_KEY = 'sentra.stats.v2';
@@ -124,8 +133,10 @@ function isLandmarkable(label: string): boolean {
 
 export default function App() {
   const cameraRef = useRef<CameraViewHandle | null>(null);
+  const firebase = useFirebase();
 
   const [activeSection, setActiveSection] = useState<SentraSection>('assistant');
+  const [liveVoicePersona, setLiveVoicePersona] = useState<LiveVoiceName>('Zephyr');
 
   // Core assistant state
   const isOnline = useOnlineStatus();
@@ -241,6 +252,28 @@ export default function App() {
     };
   }, []);
 
+  // Sync Firebase user account profile & merge Cloud Firestore memories on sign-in
+  useEffect(() => {
+    if (!firebase.authReady || !firebase.user) return;
+    firebase.syncProfile(settingsRef.current, liveVoicePersona).catch(() => {});
+  }, [firebase.authReady, firebase.user, liveVoicePersona, firebase.syncProfile]);
+
+  useEffect(() => {
+    if (!firebase.user || firebase.firestoreMemories.length === 0) return;
+    setMemories((prev) => {
+      const byId = new Map<string, SentraMemoryItem>();
+      for (const item of firebase.firestoreMemories) byId.set(item.id, item);
+      for (const item of prev) {
+        if (!byId.has(item.id)) byId.set(item.id, item);
+      }
+      const merged = Array.from(byId.values()).sort((a, b) => b.timestamp - a.timestamp);
+      try {
+        localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(merged));
+      } catch {}
+      return merged;
+    });
+  }, [firebase.user, firebase.firestoreMemories]);
+
   // Periodic tick to evaluate detection staleness
   useEffect(() => {
     if (!detectionTimestamp) return;
@@ -278,6 +311,10 @@ export default function App() {
     } catch {}
   }, []);
 
+  const [audioOwnership, setAudioOwnership] = useState<'browser' | 'wearable' | 'test'>('wearable');
+  const audioOwnershipRef = useRef(audioOwnership);
+  audioOwnershipRef.current = audioOwnership;
+
   // Device Telemetry & Analytics Gateway Hook (SSE + fallback polling)
   const handleTelemetryAlert = useCallback(
     (alert: {
@@ -302,7 +339,7 @@ export default function App() {
       if (settingsRef.current.audioFeedback) {
         playChime('hazard');
       }
-      if (audioOwnership !== 'wearable' || !activeDeviceRef.current?.connected) {
+      if (audioOwnershipRef.current !== 'wearable' || !activeDeviceRef.current?.connected) {
         speakText(alert.description, settingsRef.current.speechRate);
       }
       updateStats((s) => ({ ...s, hazards: s.hazards + 1 }));
@@ -310,16 +347,14 @@ export default function App() {
     [updateStats]
   );
 
-  const [audioOwnership, setAudioOwnership] = useState<'browser' | 'wearable' | 'test'>('wearable');
-
   const handleAudioOwnershipChange = useCallback(async (mode: 'browser' | 'wearable' | 'test') => {
     setAudioOwnership(mode);
     try {
-      await fetch('/api/device/audio/ownership', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode }),
-      });
+      let token: string | undefined;
+      try {
+        token = sessionStorage.getItem('sentra.operator.token') || undefined;
+      } catch {}
+      await updateAudioOwnership(mode, token);
     } catch {}
   }, []);
 
@@ -368,10 +403,11 @@ export default function App() {
     if (!activeDevice || !activeDevice.connected) return;
     const fwd = activeDevice.sensors.forwardDistanceCm;
     const down = activeDevice.sensors.downwardDistanceMm;
+    const criticalCm = activeDevice.runtimeConfig?.proximityCriticalCm ?? 45;
     if (
       activeHazard &&
       (activeHazard.source === 'sensor_hardware' || activeHazard.source === 'sensor_simulator') &&
-      (fwd == null || fwd >= 45) &&
+      (fwd == null || fwd >= criticalCm) &&
       (down == null || down <= 200)
     ) {
       setActiveHazard(null);
@@ -389,7 +425,7 @@ export default function App() {
     return rawPathStatus;
   }, [activeHazard, isCameraReady, rawPathStatus]);
 
-  // Memory CRUD wired to SQLite backend
+  // Memory CRUD wired to SQLite backend + Cloud Firestore when authenticated
   const handleAddMemory = useCallback(
     async (label: string, note: string, room?: string) => {
       const heading = cameraRef.current?.heading ?? activeDeviceRef.current?.sensors.imu?.heading ?? null;
@@ -402,6 +438,17 @@ export default function App() {
           source: 'user_manual',
         });
         saveMemoriesLocally([created, ...memoriesRef.current]);
+        if (firebase.user) {
+          firebase
+            .saveMemory({
+              id: created.id,
+              label: created.label,
+              note: created.note,
+              room: created.room,
+              source: created.source,
+            })
+            .catch(() => {});
+        }
       } catch (err: any) {
         const localFallback: SentraMemoryItem = {
           id: `mem-${Date.now()}`,
@@ -414,10 +461,22 @@ export default function App() {
           source: 'user_manual',
         };
         saveMemoriesLocally([localFallback, ...memoriesRef.current]);
-        setLastAppError(`Memory saved locally (server sync failed): ${err?.message || 'unknown'}`);
+        if (firebase.user) {
+          firebase
+            .saveMemory({
+              id: localFallback.id,
+              label: localFallback.label,
+              note: localFallback.note,
+              room: localFallback.room,
+              source: localFallback.source,
+            })
+            .catch(() => {});
+        } else {
+          setLastAppError(`Memory saved locally (server sync failed): ${err?.message || 'unknown'}`);
+        }
       }
     },
-    [currentRoom, saveMemoriesLocally]
+    [currentRoom, saveMemoriesLocally, firebase]
   );
 
   const handleDeleteMemory = useCallback(
@@ -428,18 +487,33 @@ export default function App() {
       } catch (err: any) {
         setLastAppError(`Memory delete sync error: ${err?.message || 'unknown'}`);
       }
+      if (firebase.user) {
+        firebase.removeMemory(id).catch(() => {});
+      }
     },
-    [saveMemoriesLocally]
+    [saveMemoriesLocally, firebase]
   );
 
   const handleClearMemories = useCallback(async () => {
+    const existingIds = memoriesRef.current.map((m) => m.id);
     saveMemoriesLocally([]);
     try {
       await clearAllMemories();
     } catch (err: any) {
       setLastAppError(`Memory clear sync error: ${err?.message || 'unknown'}`);
     }
-  }, [saveMemoriesLocally]);
+    if (firebase.user) {
+      Promise.all(existingIds.map((id) => firebase.removeMemory(id))).catch(() => {});
+    }
+  }, [saveMemoriesLocally, firebase]);
+
+  const analyzeAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      analyzeAbortRef.current?.abort();
+    };
+  }, []);
 
   // Core Multimodal Analysis Pipeline
   const executeAnalysis = useCallback(
@@ -485,25 +559,32 @@ export default function App() {
           ? 'object_query'
           : 'scene_analysis');
 
+      analyzeAbortRef.current?.abort();
+      const abortController = new AbortController();
+      analyzeAbortRef.current = abortController;
+
       try {
-        const data = await analyzeSentraObservation({
-          mode,
-          operation: inferredOp,
-          query,
-          image: snapshot.dataUrl,
-          imageTimestamp: snapshot.timestamp,
-          imageDimensions:
-            snapshot.width > 0 && snapshot.height > 0
-              ? { width: snapshot.width, height: snapshot.height }
-              : null,
-          sensors: sensorsSummary,
-          goal: activeGoalTarget,
-          memory: curMemories.slice(-30),
-          history: historyRef.current.slice(-6),
-          heading,
-          useWearableFrame: curSettings.cameraSource === 'esp32_camera',
-          wearableDeviceId: curSettings.selectedWearableDeviceId,
-        });
+        const data = await analyzeSentraObservation(
+          {
+            mode,
+            operation: inferredOp,
+            query,
+            image: snapshot.dataUrl,
+            imageTimestamp: snapshot.timestamp,
+            imageDimensions:
+              snapshot.width > 0 && snapshot.height > 0
+                ? { width: snapshot.width, height: snapshot.height }
+                : null,
+            sensors: sensorsSummary,
+            goal: activeGoalTarget,
+            memory: curMemories.slice(-30),
+            history: historyRef.current.slice(-6),
+            heading,
+            useWearableFrame: curSettings.cameraSource === 'esp32_camera',
+            wearableDeviceId: curSettings.selectedWearableDeviceId,
+          },
+          abortController.signal
+        );
 
         isProcessingRef.current = false;
         setIsProcessing(false);
@@ -639,7 +720,7 @@ export default function App() {
           setActiveHazard(null);
         }
 
-        // Explicit remember command -> persist to SQLite
+        // Explicit remember command -> persist to SQLite & Cloud Firestore
         if (mode === 'remember' && data.rememberedData) {
           try {
             const saved = await createMemory({
@@ -651,6 +732,9 @@ export default function App() {
             });
             if (saved.room) setCurrentRoom(saved.room);
             saveMemoriesLocally([saved, ...memoriesRef.current]);
+            if (firebase.user) {
+              firebase.saveMemory(saved).catch(() => {});
+            }
             spoken = `Saved to memory: ${saved.label}.`;
           } catch {
             const localItem: SentraMemoryItem = {
@@ -664,6 +748,9 @@ export default function App() {
               source: 'live_verified',
             };
             saveMemoriesLocally([localItem, ...memoriesRef.current]);
+            if (firebase.user) {
+              firebase.saveMemory(localItem).catch(() => {});
+            }
             spoken = `Saved to memory: ${localItem.label}.`;
           }
         }
@@ -796,13 +883,16 @@ export default function App() {
         }
 
         setAssistantResponse(spoken);
-        if (audioOwnership !== 'wearable' || !activeDevice?.connected) {
+        if (audioOwnershipRef.current !== 'wearable' || !activeDeviceRef.current?.connected) {
           speakText(spoken, curSettings.speechRate);
         }
         return true;
       } catch (err: any) {
         isProcessingRef.current = false;
         setIsProcessing(false);
+        if (err?.name === 'AbortError') {
+          return false;
+        }
         setIsLocalAssistActive(true);
         setLastAppError(`Analysis request error: ${err?.message || 'Network failure'}`);
 
@@ -965,15 +1055,77 @@ export default function App() {
     onUnsupportedFallback: () => setShowTextInput(true),
   });
 
+  const liveVoice = useGeminiLiveVoice({
+    deviceId: settings.selectedWearableDeviceId,
+    cameraSource: settings.cameraSource,
+    voiceName: liveVoicePersona,
+    muted: settings.voiceMuted,
+    volume: settings.voiceVolume,
+    captureBrowserSnapshot: async () => {
+      const snap = await cameraRef.current?.captureSnapshot();
+      return { dataUrl: snap?.dataUrl ?? null, timestamp: snap?.timestamp ?? null };
+    },
+    onMemorySaved: (item) => {
+      saveMemoriesLocally([item, ...memoriesRef.current.filter((m) => m.id !== item.id)]);
+      if (firebase.user) {
+        firebase.saveMemory(item).catch(() => {});
+      }
+    },
+    onHardwareEvent: (evt) => {
+      if (evt.event === 'PROXIMITY_CRITICAL' && evt.distanceCm != null) {
+        setActiveHazard({
+          id: `live-hw-${Date.now()}`,
+          type: 'obstacle',
+          severity: 'critical',
+          description: `Forward VL53L0X measures obstacle within ${Math.round(evt.distanceCm)} cm.`,
+          clockPosition: "12 o'clock",
+          source: 'sensor_hardware',
+          timestamp: Date.now(),
+        });
+      }
+    },
+    onTurnComplete: ({ userTranscript, assistantTranscript }) => {
+      if (userTranscript) setSpokenTranscript(userTranscript);
+      setAssistantResponse(assistantTranscript);
+      if (firebase.user) {
+        firebase
+          .logLiveConversationTurn({
+            sessionId: `live-${Date.now()}`,
+            deviceId: activeDeviceRef.current?.deviceId || settingsRef.current.selectedWearableDeviceId,
+            model: 'gemini-3.8-live',
+            userTranscript,
+            assistantTranscript,
+            forwardDistanceCm: activeDeviceRef.current?.sensors.forwardDistanceCm ?? null,
+          })
+          .catch(() => {});
+      }
+    },
+  });
+
+  const handleToggleLiveVoice = useCallback(async () => {
+    if (liveVoice.status === 'connected' || liveVoice.status === 'connecting') {
+      liveVoice.disconnect();
+      return;
+    }
+    stopSpeaking();
+    if (settingsRef.current.wakeWordEnabled) {
+      voice.disableWakeWord();
+    }
+    await liveVoice.connect();
+  }, [liveVoice, voice]);
+
   const handleToggleWakeWord = useCallback(
     async (nextEnabled: boolean) => {
       if (nextEnabled) {
+        if (liveVoice.status === 'connected' || liveVoice.status === 'connecting') {
+          liveVoice.disconnect();
+        }
         await voice.enableWakeWord();
       } else {
         voice.disableWakeWord();
       }
     },
-    [voice]
+    [voice, liveVoice]
   );
 
   // Spacebar push-to-talk shortcut (skips form inputs cleanly)
@@ -1167,6 +1319,32 @@ export default function App() {
           >
             {settings.voiceMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4 text-primary" />}
           </button>
+
+          {/* Firebase Google Sign-In / Signed-In Account Badge */}
+          {firebase.user ? (
+            <button
+              type="button"
+              onClick={firebase.signOut}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-success hover:bg-success/20 transition-colors"
+              title={`Signed in as ${firebase.user.email || firebase.user.displayName}. Click to sign out.`}
+            >
+              <UserIcon className="h-3.5 w-3.5 shrink-0" />
+              <span className="max-w-[110px] truncate">
+                {firebase.user.displayName?.split(' ')[0] || firebase.user.email?.split('@')[0] || 'Account'}
+              </span>
+              <LogOut className="h-3 w-3 opacity-80" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={firebase.signIn}
+              disabled={!firebase.authReady}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-primary/50 bg-primary/15 px-2.5 py-1.5 text-primary hover:bg-primary/25 transition-colors disabled:opacity-50"
+            >
+              <LogIn className="h-3.5 w-3.5" />
+              <span>Sign In</span>
+            </button>
+          )}
 
           <PWAInstallButton compact />
         </div>
@@ -1368,6 +1546,96 @@ export default function App() {
                     ? 'Say "Hey SENTRA" followed by your question while this tab is open. Say "Stop" or "Be quiet" to interrupt.'
                     : 'Camera preview stays on your device. Gemini AI analyzes a snapshot only when you ask a visual question or enable Watch.'}
                 </p>
+              </div>
+
+              {/* Real-Time Two-Way Gemini 3.8 Live Conversation Bar */}
+              <div className="rounded-xl bg-card border border-primary/40 p-3 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-primary">
+                      <PhoneCall className="h-4 w-4" />
+                      <span>Real-Time Voice Conversation ({liveVoice.modelUsed})</span>
+                      {liveVoice.status === 'connected' && (
+                        <span className="inline-flex items-center gap-1 rounded bg-success/15 border border-success/40 px-1.5 py-0.5 text-[10px] font-mono text-success">
+                          {liveVoice.isModelSpeaking ? 'SPEAKING' : 'LIVE MIC'}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[11px] text-muted-foreground">
+                      Full-duplex 16kHz/24kHz audio + live {settings.cameraSource === 'esp32_camera' ? 'OV2640 & VL53L0X hardware stream' : 'camera & sensor context'}.
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <select
+                      aria-label="Live voice persona"
+                      value={liveVoicePersona}
+                      onChange={(e) => setLiveVoicePersona(e.target.value as LiveVoiceName)}
+                      disabled={liveVoice.status === 'connected' || liveVoice.status === 'connecting'}
+                      className="rounded-lg bg-secondary border border-border px-2 py-1.5 text-xs font-mono text-foreground disabled:opacity-50"
+                    >
+                      {(['Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir'] as const).map((v) => (
+                        <option key={v} value={v}>
+                          Voice: {v}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={handleToggleLiveVoice}
+                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold border transition-colors ${
+                        liveVoice.status === 'connected' || liveVoice.status === 'connecting'
+                          ? 'bg-destructive text-destructive-foreground border-destructive'
+                          : 'bg-primary text-primary-foreground border-primary hover:brightness-110'
+                      }`}
+                    >
+                      {liveVoice.status === 'connected' || liveVoice.status === 'connecting' ? (
+                        <>
+                          <PhoneOff className="h-3.5 w-3.5" />
+                          <span>{liveVoice.status === 'connecting' ? 'Connecting…' : 'End Live Call'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <PhoneCall className="h-3.5 w-3.5" />
+                          <span>Start Live Voice</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {liveVoice.error && (
+                  <p className="rounded-lg bg-destructive/15 border border-destructive/40 px-2.5 py-1.5 text-xs font-mono text-destructive">
+                    {liveVoice.error}
+                  </p>
+                )}
+
+                {liveVoice.status === 'connected' && (
+                  <div className="rounded-lg bg-secondary/70 border border-border p-2.5 space-y-1 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-muted-foreground">
+                      <span>
+                        Hardware Link:{' '}
+                        <strong className={liveVoice.hardwareLinked ? 'text-success' : 'text-foreground'}>
+                          {liveVoice.hardwareLinked ? `${settings.selectedWearableDeviceId} Connected` : 'Standby'}
+                        </strong>
+                      </span>
+                      <span>
+                        Firestore Log: {firebase.user ? 'Auto-syncing turns' : 'Sign in to save history'}
+                      </span>
+                    </div>
+                    {liveVoice.userTranscript && (
+                      <p className="text-foreground">
+                        <span className="font-bold text-primary">You:</span> {liveVoice.userTranscript}
+                      </p>
+                    )}
+                    {liveVoice.assistantTranscript && (
+                      <p className="text-foreground">
+                        <span className="font-bold text-accent">SENTRA:</span> {liveVoice.assistantTranscript}
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Spoken Response & Transcript Card */}
