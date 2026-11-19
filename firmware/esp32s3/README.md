@@ -1,143 +1,85 @@
-# SENTRA ESP32-S3 Wearable Firmware (WM8960 Audio Subsystem)
+# SENTRA ESP32-S3 firmware — source status and build instructions
 
-This directory contains the production-grade embedded C firmware for the **SENTRA Assistive Wearable**, powered by an **ESP32-S3 N16R8** microcontroller and a **standalone Waveshare WM8960 Audio Board** (with a single-ear wired TRRS headset with microphone).
+This repository contains a **pre-hardware** ESP-IDF project targeting an ESP32-S3
+N16R8 (16 MB flash, 8 MB PSRAM). It is NOT a finished or validated navigation
+device. The previous README overstated the implementation status.
 
----
+## Implemented in firmware source
 
-## 1. Hardware Architecture & Verification Status
+- ESP-IDF app entry point and WM8960 register/I2S programming.
+- Short button-triggered WAV recording and authenticated audio upload.
+- Bounded WAV response download and one-shot I2S playback.
+- Wi-Fi station/reconnection source with local menuconfig settings.
+- OV2640 JPEG camera capture and authenticated binary frame uploads
+  (opt-in; firmware pinout has NOT been physically verified).
+- Periodic authenticated telemetry to existing `/api/device/telemetry`.
+  Sensor fields are intentionally null until real drivers are integrated.
 
-| Subsystem | Hardware Component | Interface | Software Status | Physical Silicon Status |
-| :--- | :--- | :--- | :--- | :--- |
-| **Main Microcontroller** | ESP32-S3 N16R8 (16MB Flash, 8MB PSRAM) | Dual-core Xtensa @ 240 MHz | ✅ Complete | Verified on ESP32-S3 |
-| **Audio Codec** | Waveshare WM8960 Audio Board (Standalone) | I²S Audio + I²C Control | ✅ Complete | Software-tested; pending breadboard flash |
-| **Audio Interface** | Single-ear TRRS Headset with Mic | 3.5mm CTIA standard | ✅ Driver written | Requires physical CTIA headset |
-| **Vision Sensor** | OV2640 Parallel DVP Camera Module | 8-bit Parallel DVP + SCCB | ✅ Complete | Supported in pinout matrix |
-| **Forward Distance** | VL53L0X Time-of-Flight Sensor #1 | Shared I²C (XSHUT addr: 0x30) | ✅ Complete | Supported in driver |
-| **Ground Drop-off** | VL53L0X Time-of-Flight Sensor #2 | Shared I²C (XSHUT addr: 0x31) | ✅ Complete | Supported in driver |
-| **Inertial Measurement** | MPU6050 6-DoF IMU | Shared I²C (0x68) | ✅ Complete | Supported in driver |
-| **Offline Safety Alerts** | Local Acoustic Tone Synthesizer | Direct PCM via WM8960 DAC | ✅ Complete & Tested | Autonomous (zero cloud dependency) |
+## Not yet implemented or demonstrated
 
-> [!IMPORTANT]
-> **Hardware Disclaimer:** While the driver code, register configuration, buffer protocol, and state machine have been thoroughly implemented and unit-tested in software (Vitest test suite passing with 44/44 tests), physical audio performance requires flashing onto silicon with the physical Waveshare WM8960 board and CTIA headset wired as documented below.
+- Two functional VL53L0X ranging drivers and XSHUT address assignment.
+- Actual MPU6050 measurements and INA219 power telemetry.
+- Hardware-independent sensor alerts from confirmed physical readings.
+- Real always-listening / hands-free "Hey SENTRA" wake-word recognition;
+  button-triggered WAV is the currently compiled firmware path.
+- WM8960 microphone/headset electrical tests or volume calibration.
+- Simultaneous camera, I2C, I2S and Wi-Fi physical reliability.
+- Headband-to-bag OV2640 parallel cable integrity.
+- Verified SLAM, safe autonomous navigation, or independent mobility.
 
----
+The server and browser can support additional functionality, but that does
+not imply the ESP32 firmware implements those features.
 
-## 2. GPIO Pinout Coexistence Matrix
+## Environment
 
-The ESP32-S3 N16R8 coexists with the OV2640 parallel camera, two VL53L0X ToF distance sensors, the MPU6050 IMU, the Push-to-Talk button, and the WM8960 audio codec without pin conflicts or strapping interference.
+Use ESP-IDF **v5.3** for the pinned CI configuration.
+The ESP32 camera component is declared in `main/idf_component.yml`.
 
-| Peripheral | Signal | ESP32-S3 GPIO | Description / Notes |
-| :--- | :--- | :--- | :--- |
-| **Shared I²C Bus** | **SDA** | **GPIO 47** | Shared by WM8960 (0x1A), MPU6050 (0x68), VL53L0X #1 (0x30), VL53L0X #2 (0x31) |
-| **Shared I²C Bus** | **SCL** | **GPIO 48** | Shared 400 kHz bus with internal/external pull-ups (4.7kΩ recommended) |
-| **VL53L0X #1** | **XSHUT** | **GPIO 21** | Reset pin to assign forward sensor address to `0x30` on boot |
-| **VL53L0X #2** | **XSHUT** | **GPIO 4** | Reset pin to assign downward sensor address to `0x31` on boot |
-| **WM8960 Codec** | **I²S BCLK** | **GPIO 41** | Bit clock output from ESP32-S3 (Master) to WM8960 (Slave) |
-| **WM8960 Codec** | **I²S WS / LRC** | **GPIO 42** | Word select / Frame synchronization clock |
-| **WM8960 Codec** | **I²S DOUT** | **GPIO 2** | Serial data output from ESP32-S3 to WM8960 DAC (Headphone playback) |
-| **WM8960 Codec** | **I²S DIN** | **GPIO 1** | Serial data input from WM8960 ADC to ESP32-S3 (Microphone capture) |
-| **WM8960 Codec** | **I²S MCLK** | **GPIO 38** | Master clock (12.288 MHz or 256×fs generated by ESP32-S3) |
-| **Action Button** | **PTT / Trigger** | **GPIO 5** | Active-low momentary switch with internal pull-up |
-| **OV2640 Camera** | **D0 – D7** | **GPIO 11, 9, 8, 10, 12, 18, 17, 16** | 8-bit parallel data bus |
-| **OV2640 Camera** | **XCLK** | **GPIO 15** | 20 MHz master clock output |
-| **OV2640 Camera** | **PCLK** | **GPIO 13** | Pixel clock from camera |
-| **OV2640 Camera** | **VSYNC** | **GPIO 6** | Vertical sync |
-| **OV2640 Camera** | **HREF** | **GPIO 7** | Horizontal reference |
-| **OV2640 Camera** | **PWDN** | **GPIO 14** | Power down control |
-
-### Strictly Avoided Pins (Do Not Reassign):
-- **GPIO 33, 34, 35, 36, 37**: Dedicated internal Octal SPI Flash and Octal PSRAM bus on the ESP32-S3 N16R8. Any software write to these pins causes a kernel panic / immediate system crash.
-- **GPIO 0, 3, 45, 46**: ESP32-S3 strapping pins (boot mode and supply voltage).
-- **GPIO 19, 20**: USB D- / D+ native USB serial / JTAG console.
-
----
-
-## 3. Waveshare WM8960 Board Wiring & Headset Details
-
-### Board Distinction:
-Use the **Standalone Waveshare WM8960 Audio Board** (with standard 2.54mm header pins and onboard 3.5mm TRRS jack), **NOT** the 40-pin Raspberry Pi WM8960 Audio HAT.
-
-### Header Pin Connections:
-| Waveshare WM8960 Pin | ESP32-S3 Pin | Function |
-| :--- | :--- | :--- |
-| **VCC** | 3.3V (or 5V if using onboard LDO) | Power supply |
-| **GND** | GND | Common ground |
-| **SDA** | GPIO 47 | I²C Data (Address `0x1A`) |
-| **SCL** | GPIO 48 | I²C Clock |
-| **BCLK** | GPIO 41 | I²S Bit Clock |
-| **LRC** | GPIO 42 | I²S Word Select |
-| **DACDAT** | GPIO 2 | I²S Data Out (to Headphone DAC) |
-| **ADCDAT** | GPIO 1 | I²S Data In (from Microphone ADC) |
-| **MCLK** | GPIO 38 | Master Clock (or grounded if using internal PLL) |
-
-### 3.5mm TRRS Headset Standard:
-The onboard 3.5mm jack uses the **CTIA standard**:
-- **Tip**: Left Audio (Headphone)
-- **Ring 1**: Right Audio (Headphone)
-- **Ring 2**: Ground (GND)
-- **Sleeve**: Microphone In (Electret with 2.2V `MICBIAS`)
-
-*(Note: If using an older OMTP headset, Ring 2 and Sleeve are swapped; a passive CTIA-to-OMTP adapter is required).*
-
----
-
-## 4. Deterministic Audio State Machine
-
-The firmware executes this state cycle:
-```
-[STANDBY]
-    │ (User button press or wake trigger)
-    ▼
-[RECORDING] (Records 16 kHz Mono 16-bit PCM WAV, plays start chime)
-    │
-    ▼
-[TRANSCRIBING] (Uploads to POST /api/device/audio/utterance)
-    │
-    ▼
-[REASONING] (Backend runs SENTRA UNDERSTAND → OBSERVE → REASON → ACT pipeline)
-    │
-    ▼
-[SPEECH_GENERATION] (Server synthesizes 24 kHz WAV via Gemini TTS)
-    │
-    ▼
-[PLAYBACK] (Streams WAV reply into WM8960 DAC through headphone)
-    │
-    ▼
-[STANDBY]
-```
-Error, Cancelled, and Disconnected transitions safely reset DMA buffers and return to `STANDBY`.
-
----
-
-## 5. Autonomous Local Sensor Alerts (Offline Safety)
-
-If the forward ToF distance falls below `SENTRA_HAZARD_OBSTACLE_CM` (80 cm) or ground drop-off exceeds `SENTRA_HAZARD_CLIFF_MM` (150 mm), the `sensor_safety_task` immediately calls `local_alerts_play()`.
-
-1. **Immediate Interrupt:** Calls `i2s_audio_abort_playback()` to immediately silence any ongoing Gemini conversation.
-2. **Local PCM Generation:** Synthesizes an emergency acoustic alert tone (double-chirp 880 Hz / 1175 Hz for obstacles, descending 450 Hz tone for drop-offs) directly in memory and plays it via DMA.
-3. **No Cloud Dependency:** Functions 100% autonomously even if Wi-Fi or server connectivity is completely lost.
-
----
-
-## 6. How to Build & Flash with ESP-IDF
-
-### Prerequisites:
-- ESP-IDF v5.1 or v5.2 installed (`. $HOME/esp/esp-idf/export.sh`)
-- Connected ESP32-S3 board via USB
-
-### Commands:
-```bash
+```sh
 cd firmware/esp32s3
-
-# 1. Set target to ESP32-S3
 idf.py set-target esp32s3
-
-# 2. Configure Wi-Fi SSID and Server IP in menuconfig (or edit include/sentra_config.h)
 idf.py menuconfig
-
-# 3. Build firmware
 idf.py build
-
-# 4. Flash and monitor
-idf.py -p /dev/tty.usbmodem* flash monitor
 ```
+
+In menuconfig, configure a LOCAL development SSID, server origin,
+registered device ID and the ONE-TIME provisioned device token.
+The backend device must first be registered through the operator-controlled
+registration endpoint. The firmware does not have an unauthenticated
+auto-registration route.
+
+**Do not commit `sdkconfig`, Wi-Fi passwords or device tokens.**
+Build artifacts are ignored; compile locally rather than committing .bin files.
+
+Set `SENTRA_ENABLE_CAMERA=y` **only after confirming the actual ESP32 board
+revision, camera breakout, power rails, pinout and cable length**. The current
+`board_profile.h` map is provisional and may conflict with board peripherals.
+
+The current network upload client is designed for an isolated, trusted LAN.
+Do not expose plaintext device tokens on an untrusted network; validated
+TLS configuration is still required for an internet-exposed deployment.
+
+## Backend endpoints used by this firmware
+
+- POST `/api/device/telemetry`: periodically records device status and
+  freshness, using `schemaVersion: 1`. Unknown ToF/IMU/battery values are null.
+- POST `/api/device/frame`: raw `image/jpeg` with device ID, token and frame sequence.
+- POST `/api/device/audio/utterance`: bounded WAV microphone capture.
+- GET `/api/device/audio/reply/:replyId`: bounded PCM WAV playback.
+- GET `/api/device/poll`: optional action retrieval.
+- POST `/api/device/ack`: existing acknowledgment contract (still needs
+  end-to-end device action verification).
+
+**There is no GET `/api/device/heartbeat` endpoint.** Telemetry is the
+connection heartbeat.
+
+## Verification
+
+GitHub Actions runs the JavaScript/TypeScript checks and a firmware
+compiler job. Check the run for the EXACT target commit. A successful
+ESP-IDF build shows that compiled source links; it does not exercise
+physical sensors, camera pins or headset audio.
+
+- [Hardware arrival and validation checklist](../../docs/hardware-integration/acceptance-checklist.md)
+- [Known limitations](../../docs/hardware-integration/known-limitations.md)
+- [Integration status](../../docs/hardware-integration/STATUS.md)

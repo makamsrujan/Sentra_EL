@@ -7,9 +7,11 @@ The project combines camera-based visual analysis, proximity-sensor telemetry, n
 
 **UNDERSTAND → OBSERVE → REASON → ACT → VERIFY → UPDATE**
 
-> **Prototype status:** This repository contains the React/TypeScript companion application and its Node/Express backend. Browser-camera, voice, Gemini, telemetry, wearable JPEG viewing, memory, and analytics code paths are present. Their behavior still requires browser, server, and end-to-end testing. **Physical ESP32-S3 firmware and validated independent navigation are not included in this repository.**
+> **Prototype status:** This repository contains the React/TypeScript companion application and its Node/Express backend. Browser-camera, voice, Gemini, telemetry, wearable JPEG viewing, memory, and analytics code paths are present. Their behavior still requires browser, server, and end-to-end testing. **ESP32-S3 firmware source is included, but ToF sensor acquisition, MPU6050 integration, independent embedded wake-word detection and physically verified navigation are incomplete or unverified.**
 
 > **Safety:** SENTRA is an experimental aid, **not** a certified mobility or obstacle-avoidance device. It must not be used as the sole basis for walking, crossing roads, or avoiding hazards. An absence of detected obstacles is **not** confirmation of a safe path.
+
+**Integration status:** See [pre-hardware readiness](docs/hardware-integration/STATUS.md), [firmware README](firmware/esp32s3/README.md) and [GitHub CI](https://github.com/makamsrujan/Sentra_EL/actions/workflows/verify.yml). Build success is not proof of hardware operation.
 
 ## What we are building
 
@@ -17,7 +19,7 @@ SENTRA has three cooperating parts:
 
 | Part | Role |
 | --- | --- |
-| **ESP32-S3 wearable (hardware workstream)** | Intended to capture camera/sensor data, assess supported proximity measurements, and produce **immediate local alerts** without depending on a web page or cloud connection. Hardware firmware is a separate deliverable. |
+| **ESP32-S3 wearable (hardware workstream)** | Intended to capture camera/sensor data, assess supported proximity measurements, and produce **immediate local alerts** without depending on a web page or cloud connection. Initial firmware source is in `firmware/esp32s3/`; module availability and real-world alert performance still require implementation and hardware testing. |
 | **SENTRA AI Assistant (web app experience)** | Browser camera preview, questions and voice interaction, on-demand Gemini AI Visual Analysis, object-search goals, active perception, and contextual memory. |
 | **SENTRA Wearable Companion (web app experience)** | ESP32 device status, wearable JPEG preview, telemetry, event history, analytics, and diagnostics. |
 
@@ -32,7 +34,7 @@ flowchart TD
     APP --> API["Express server / API"]
     API --> GEM["Gemini API: optional cloud reasoning"]
     API --> DB[("SQLite: events and memories")]
-    ESP["ESP32-S3 wearable (external firmware)"] -->|"Authenticated telemetry + JPEG"| API
+    ESP["ESP32-S3 wearable (firmware under development)"] -->|"Authenticated telemetry + JPEG"| API
     API -->|"Optional queued actions"| ESP
     API -->|"Device status, frames, history"| APP
     ESP --> LOCAL["Local sensor-based alerts (firmware target)"]
