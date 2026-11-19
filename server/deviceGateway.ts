@@ -8,6 +8,7 @@ import type {
   WearableActionItem,
   WearableFrameStatus,
 } from '../src/types/deviceProtocol';
+import type { GoalTask } from '../src/types/sentra';
 import { hashToken, SentraEventStore } from './eventStore';
 
 const DEFAULT_HEARTBEAT_TIMEOUT_MS = Number(process.env.SENTRA_HEARTBEAT_TIMEOUT_MS || 15000);
@@ -42,6 +43,7 @@ interface InternalDeviceState {
   frameSequenceCounter: number;
   actions: WearableActionItem[];
   lastAlertTimes: Record<string, number>;
+  activeGoal: GoalTask | null;
 }
 
 export class DeviceGateway {
@@ -125,6 +127,7 @@ export class DeviceGateway {
       frameSequenceCounter: 0,
       actions: [],
       lastAlertTimes: {},
+      activeGoal: null,
     };
   }
 
@@ -491,6 +494,7 @@ export class DeviceGateway {
       audioUrl?: string | null;
       audioFormat?: 'wav' | null;
       audioDurationMs?: number | null;
+      deliveryMode?: 'direct_response' | 'poll_queue';
     }
   ): WearableActionItem | null {
     const state = this.devices.get(deviceId);
@@ -508,6 +512,7 @@ export class DeviceGateway {
       audioUrl: action.audioUrl ?? null,
       audioFormat: action.audioFormat ?? null,
       audioDurationMs: action.audioDurationMs ?? null,
+      deliveryMode: action.deliveryMode ?? 'poll_queue',
     };
 
     state.actions.push(item);
@@ -529,7 +534,21 @@ export class DeviceGateway {
     const now = Date.now();
     // Expire unacknowledged actions older than 60s
     state.actions = state.actions.filter((a) => now - a.createdAt < 60000);
-    return state.actions.filter((a) => a.acknowledgedAt === null);
+    // Exclude actions that were already delivered directly via utterance response to prevent duplicate playback
+    return state.actions.filter((a) => a.acknowledgedAt === null && a.deliveryMode !== 'direct_response');
+  }
+
+  public getActiveGoal(deviceId?: string): GoalTask | null {
+    const targetId = deviceId || 'ESP32-S3-SENTRA-001';
+    return this.devices.get(targetId)?.activeGoal ?? null;
+  }
+
+  public setActiveGoal(deviceId: string, goal: GoalTask | null): void {
+    const state = this.devices.get(deviceId);
+    if (state) {
+      state.activeGoal = goal;
+      this.broadcast('goal_update', { deviceId, goal, timestamp: Date.now() });
+    }
   }
 
   public acknowledgeActions(deviceId: string, actionIds: string[]): number {

@@ -204,17 +204,20 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
     });
 
     it('processes a valid direct transcript utterance and returns voice turn status', async () => {
+      const opToken = 'test-op-token-audio';
+      process.env.SENTRA_OPERATOR_TOKEN = opToken;
       const { app } = createSentraApp({ dbPath: ':memory:' });
       const server = app.listen(0);
       const port = (server.address() as any).port;
       const devToken = process.env.SENTRA_DEVICE_TOKEN || 'sentra-dev-key-default';
 
-      // Send emergency stop via JSON transcript
+      // Send emergency stop via JSON transcript with operator token
       const res = await fetch(`http://127.0.0.1:${port}/api/device/audio/utterance`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Device-Token': devToken,
+          'X-Operator-Token': opToken,
         },
         body: JSON.stringify({
           deviceId: 'ESP32-S3-SENTRA-001',
@@ -236,6 +239,7 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
         headers: {
           'Content-Type': 'application/json',
           'X-Device-Token': devToken,
+          'X-Operator-Token': opToken,
         },
         body: JSON.stringify({
           deviceId: 'ESP32-S3-SENTRA-001',
@@ -248,6 +252,84 @@ describe('SENTRA Hardware Audio Pipeline & Codec Protocol', () => {
       const dupJson = await dupRes.json();
       expect(dupJson.ok).toBe(false);
       expect(dupJson.error).toContain('Duplicate');
+
+      server.close();
+    });
+
+    it('enforces authentication on audio reply download and rejects mismatched device identity', async () => {
+      const opToken = 'test-op-token-audio';
+      process.env.SENTRA_OPERATOR_TOKEN = opToken;
+      const { app, audioReplyStore } = createSentraApp({ dbPath: ':memory:' });
+      const server = app.listen(0);
+      const port = (server.address() as any).port;
+      const devToken = process.env.SENTRA_DEVICE_TOKEN || 'sentra-dev-key-default';
+
+      // 1. Store a test reply directly in audioReplyStore
+      const testBuffer = synthesizeTestToneWav(200);
+      const stored = audioReplyStore.storeReply({
+        deviceId: 'ESP32-S3-SENTRA-001',
+        buffer: testBuffer,
+        sampleRate: 24000,
+        durationMs: 200,
+      });
+      const replyId = stored.replyId;
+
+      // 2. Unauthenticated request to reply endpoint is rejected with 401
+      const unauthRes = await fetch(`http://127.0.0.1:${port}/api/device/audio/reply/${replyId}`);
+      expect(unauthRes.status).toBe(401);
+
+      // 3. Mismatched device ID is rejected with 403
+      const mismatchRes = await fetch(
+        `http://127.0.0.1:${port}/api/device/audio/reply/${replyId}?deviceId=OTHER-DEV-999`,
+        {
+          headers: { 'X-Device-Token': devToken, 'X-Operator-Token': opToken },
+        }
+      );
+      expect(mismatchRes.status).toBe(403);
+
+      // 4. Authorized download succeeds and streams WAV bytes
+      const authRes = await fetch(
+        `http://127.0.0.1:${port}/api/device/audio/reply/${replyId}?deviceId=ESP32-S3-SENTRA-001`,
+        {
+          headers: { 'X-Device-Token': devToken },
+        }
+      );
+      expect(authRes.status).toBe(200);
+      expect(authRes.headers.get('Content-Type')).toBe('audio/wav');
+      const bytes = await authRes.arrayBuffer();
+      expect(bytes.byteLength).toBe(testBuffer.length);
+
+      server.close();
+    });
+
+    it('protects audio ownership changes with operator credentials', async () => {
+      const opToken = 'test-op-token-audio';
+      process.env.SENTRA_OPERATOR_TOKEN = opToken;
+      const { app } = createSentraApp({ dbPath: ':memory:' });
+      const server = app.listen(0);
+      const port = (server.address() as any).port;
+
+      // Unauthenticated ownership change is rejected with 401
+      const unauth = await fetch(`http://127.0.0.1:${port}/api/device/audio/ownership`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'browser' }),
+      });
+      expect(unauth.status).toBe(401);
+
+      // Operator authenticated change succeeds
+      const auth = await fetch(`http://127.0.0.1:${port}/api/device/audio/ownership`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Operator-Token': opToken,
+        },
+        body: JSON.stringify({ mode: 'browser' }),
+      });
+      expect(auth.status).toBe(200);
+      const json = await auth.json();
+      expect(json.ok).toBe(true);
+      expect(json.mode).toBe('browser');
 
       server.close();
     });

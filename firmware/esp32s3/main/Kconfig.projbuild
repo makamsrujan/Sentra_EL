@@ -1,0 +1,49 @@
+// Kconfig for SENTRA ESP32-S3 firmware
+// This file defines project configuration options.
+
+menu "SENTRA Firmware Configuration"
+
+config SENTRA_WIFI_SSID
+    string "Wi-Fi SSID"
+    default "your-ssid"
+    help
+      The SSID of the Wi-Fi network the device should connect to.
+
+config SENTRA_WIFI_PASSWORD
+    string "Wi-Fi Password"
+    default "your-password"
+    help
+      Password for the Wi-Fi network.
+
+config SENTRA_BACKEND_URL
+    string "Backend server URL"
+    default "https://your-backend.example.com"
+    help
+      Base URL of the SENTRA backend (e.g., https://example.com).
+
+config SENTRA_DEVICE_ID
+    string "Device ID"
+    default "sentra-001"
+    help
+      Unique identifier for this device instance.
+
+config SENTRA_DEVICE_TOKEN
+    string "Device Token"
+    default ""
+    help
+      Authentication token for the device (empty if not used).
+
+config SENTRA_ENABLE_INA219
+    bool "Enable optional INA219 power monitor"
+    default n
+    help
+      Build with support for INA219 if the board includes it.
+
+config SENTRA_ENABLE_VAD
+    bool "Enable network‑assisted wake‑word VAD"
+    default y
+    help
+      Enable the voice‑activity‑detection task that records short audio bursts
+      and uploads them for wake‑word verification.
+
+endmenu

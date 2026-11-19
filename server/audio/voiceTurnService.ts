@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import type { AudioUtteranceResponse } from '../../src/types/deviceProtocol';
+import type { GoalTask } from '../../src/types/sentra';
 import { parseVoiceIntent } from '../../src/utils/parser';
 import type { DeviceGateway } from '../deviceGateway';
 import type { SentraEventStore } from '../eventStore';
@@ -134,6 +135,9 @@ export async function processWearableVoiceTurn(
     const spoken = 'SENTRA stopped.';
     let audioReplyId: string | null = null;
 
+    // Reset active persistent goal
+    gateway.setActiveGoal(deviceId, null);
+
     const tts = await synthesizeSpeechWav(spoken, { apiKey });
     if (tts.ok && tts.buffer) {
       const stored = audioReplyStore.storeReply({
@@ -153,6 +157,7 @@ export async function processWearableVoiceTurn(
       audioUrl: audioReplyId ? `/api/device/audio/reply/${audioReplyId}` : null,
       audioFormat: 'wav',
       audioDurationMs: tts.durationMs ?? null,
+      deliveryMode: 'direct_response',
     });
 
     gateway.broadcast('voice_turn', {
@@ -234,7 +239,29 @@ export async function processWearableVoiceTurn(
     });
   }
 
-  // 7. Synthesize spoken response audio for the wearable headset
+  // 7. Update persistent goal state across wearable and frontend
+  let activeGoal = gateway.getActiveGoal(deviceId);
+  if (intent.mode === 'find' || intent.goal) {
+    activeGoal = {
+      id: activeGoal?.id || `goal-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      intent: intent.query || command || transcript,
+      targetObject: intent.goal || undefined,
+      state: analysis.foundTarget ? 'completed' : 'active',
+      requiredObservation: analysis.activePerceptionRequest || 'Scan environment to spot the target.',
+      nextSafeAction: analysis.suggestedAction || analysis.reachGuidance?.handInstruction || null,
+    };
+    gateway.setActiveGoal(deviceId, activeGoal);
+  } else if (analysis.goalUpdate && activeGoal) {
+    activeGoal = {
+      ...activeGoal,
+      targetObject: analysis.goalUpdate.targetObject || activeGoal.targetObject,
+      state: (analysis.goalUpdate.state as GoalTask['state']) || activeGoal.state,
+      nextSafeAction: analysis.goalUpdate.nextAction || activeGoal.nextSafeAction,
+    };
+    gateway.setActiveGoal(deviceId, activeGoal);
+  }
+
+  // 8. Synthesize spoken response audio for the wearable headset
   const spokenText = analysis.spokenResponse || 'Understood.';
   let audioReplyId: string | null = null;
   let audioDurationMs: number | null = null;
@@ -251,7 +278,7 @@ export async function processWearableVoiceTurn(
     audioDurationMs = tts.durationMs ?? null;
   }
 
-  // 8. Enqueue action for device polling
+  // 9. Enqueue action for device history (marked as direct_response so poll won't duplicate speech)
   gateway.enqueueAction(deviceId, {
     type: 'speech',
     text: spokenText,
@@ -260,9 +287,10 @@ export async function processWearableVoiceTurn(
     audioUrl: audioReplyId ? `/api/device/audio/reply/${audioReplyId}` : null,
     audioFormat: 'wav',
     audioDurationMs,
+    deliveryMode: 'direct_response',
   });
 
-  // 9. Broadcast SSE event for real-time frontend observation
+  // 10. Broadcast SSE event for real-time frontend observation
   gateway.broadcast('voice_turn', {
     turnId,
     deviceId,
@@ -273,6 +301,7 @@ export async function processWearableVoiceTurn(
     command: command || transcript,
     spokenResponse: spokenText,
     analysis,
+    goal: activeGoal,
     audioReplyId,
     latencyMs: Date.now() - startTime,
     timestamp: Date.now(),

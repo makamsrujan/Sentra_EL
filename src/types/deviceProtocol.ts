@@ -162,6 +162,7 @@ export interface WearableActionItem {
   audioUrl?: string | null;
   audioFormat?: 'wav' | null;
   audioDurationMs?: number | null;
+  deliveryMode?: 'direct_response' | 'poll_queue';
 }
 
 export interface RegisteredDeviceSummary {

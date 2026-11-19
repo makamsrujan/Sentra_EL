@@ -110,6 +110,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
 
   const audioReplyStore = new AudioReplyStore();
   const lastProcessedAudioSequence = new Map<string, number>();
+  const activeVoiceTurns = new Set<string>();
   let audioOwnershipMode: 'browser' | 'wearable' | 'test' = 'wearable';
 
   app.use(express.json({ limit: '15mb' }));
@@ -417,14 +418,30 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
 
     const seqHeader = req.header('x-sequence') || req.query.sequence || req.body?.sequence;
     const sequence = Number.parseInt(String(seqHeader ?? '0'), 10);
+    if (!Number.isFinite(sequence) || sequence < 0) {
+      return res.status(400).json({
+        ok: false,
+        error: 'Invalid recording sequence: must be a non-negative integer.',
+      });
+    }
 
-    // Prevent duplicate processing of the exact same recording sequence
-    const lastSeq = lastProcessedAudioSequence.get(deviceId);
-    if (lastSeq !== undefined && sequence > 0 && sequence === lastSeq) {
+    // Prevent duplicate or out-of-order processing of recording sequences
+    const lastSeq = lastProcessedAudioSequence.get(deviceId) ?? 0;
+    if (sequence > 0 && sequence <= lastSeq) {
       return res.status(409).json({
         ok: false,
-        error: 'Duplicate audio recording sequence ignored.',
+        error: 'Duplicate or out-of-order audio recording sequence rejected.',
         sequence,
+        lastSequence: lastSeq,
+      });
+    }
+
+    // Check concurrency: prevent overlapping voice turns for the same device
+    if (activeVoiceTurns.has(deviceId)) {
+      return res.status(429).json({
+        ok: false,
+        deviceId,
+        error: 'A voice turn is already actively processing for this device.',
       });
     }
 
@@ -449,6 +466,18 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       });
     }
 
+    // Restrict direct transcript submission to operator or authorized testbench/simulator
+    if (!wavBuffer && rawTranscript) {
+      const opAuth = requireOperatorAuth(req);
+      const isSim = isSimulatorAllowed(req, gateway);
+      if (!opAuth.ok && !isSim.allowed) {
+        return res.status(403).json({
+          ok: false,
+          error: 'Direct transcript submission without WAV audio requires operator or simulator authorization.',
+        });
+      }
+    }
+
     if (wavBuffer) {
       const wavCheck = validateWavBuffer(wavBuffer, {
         expectedChannels: 1,
@@ -464,6 +493,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       }
     }
 
+    activeVoiceTurns.add(deviceId);
     lastProcessedAudioSequence.set(deviceId, sequence);
 
     try {
@@ -488,23 +518,34 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
         status: 'failed',
         error: `Voice turn processing failed: ${message}`,
       });
+    } finally {
+      activeVoiceTurns.delete(deviceId);
     }
   });
 
   app.get('/api/device/audio/reply/:replyId', (req, res) => {
     const { replyId } = req.params;
     const token = extractBearerOrHeaderToken(req);
-    const deviceId = (
-      typeof req.query.deviceId === 'string' ? req.query.deviceId : req.header('x-device-id')
-    )?.trim();
 
-    if (deviceId && !gateway.authenticateHardwareToken(token, deviceId)) {
-      return res.status(401).json({ ok: false, error: 'Unauthorized audio reply retrieval.' });
-    }
-
-    const reply = audioReplyStore.getReply(replyId, deviceId || undefined);
+    // Look up reply in store
+    const reply = audioReplyStore.getReply(replyId);
     if (!reply) {
       return res.status(404).json({ ok: false, error: 'Audio reply not found or expired.' });
+    }
+
+    // Require authentication: device token matching reply.deviceId OR operator credentials
+    const opAuth = requireOperatorAuth(req);
+    const isDevAuth = gateway.authenticateHardwareToken(token, reply.deviceId);
+    if (!isDevAuth && !opAuth.ok) {
+      return res.status(401).json({ ok: false, error: 'Unauthorized: Valid device token or operator credentials required to retrieve audio reply.' });
+    }
+
+    // If caller specified a deviceId query or header, verify it matches the reply's owner
+    const callerDeviceId = (
+      typeof req.query.deviceId === 'string' ? req.query.deviceId : req.header('x-device-id')
+    )?.trim();
+    if (callerDeviceId && callerDeviceId !== reply.deviceId) {
+      return res.status(403).json({ ok: false, error: 'Device ID mismatch: you cannot retrieve another device\'s generated speech.' });
     }
 
     res.setHeader('Content-Type', 'audio/wav');
@@ -537,6 +578,18 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
   });
 
   app.post('/api/device/audio/ownership', (req, res) => {
+    // Require operator auth or device token to change ownership
+    const opAuth = requireOperatorAuth(req);
+    const token = extractBearerOrHeaderToken(req);
+    const isDevAuth = token ? gateway.authenticateHardwareToken(token) : false;
+
+    if (!opAuth.ok && !isDevAuth) {
+      return res.status(401).json({
+        ok: false,
+        error: 'Unauthorized: Operator or valid device token required to change audio ownership.',
+      });
+    }
+
     const mode = req.body?.mode;
     if (mode === 'browser' || mode === 'wearable' || mode === 'test') {
       audioOwnershipMode = mode;
@@ -762,7 +815,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     return res.json(result);
   });
 
-  return { app, store, gateway };
+  return { app, store, gateway, audioReplyStore };
 }
 
 async function startServer() {
