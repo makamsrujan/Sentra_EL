@@ -1,0 +1,33 @@
+name: Regenerate SENTRA dependency lockfile (temporary)
+on:
+  push:
+    branches: [fix/restore-reproducible-npm-ci]
+    paths:
+      - package.json
+      - .github/workflows/regenerate-lockfile.yml
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  regenerate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.12.0'
+      - name: Generate npm lockfile from required application dependencies
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Commit updated lockfile to fix branch
+        run: |
+          if git diff --quiet -- package-lock.json; then
+            echo "No lockfile change needed"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "fix(ci): regenerate npm lockfile for Firebase and WebSocket dependencies"
+          git push origin HEAD:fix/restore-reproducible-npm-ci
