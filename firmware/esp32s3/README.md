@@ -18,7 +18,8 @@ device. The previous README overstated the implementation status.
 ## Not yet implemented or demonstrated
 
 - Two functional VL53L0X ranging drivers and XSHUT address assignment.
-- Real MPU6050 register reading is integrated into telemetry, but has not been\n  checked on silicon. INA219 power sensing remains unimplemented.
+- Real MPU6050 register reading is integrated into telemetry, but has not been
+  checked on silicon. INA219 power sensing remains unimplemented.
 - Hardware-independent sensor alerts from confirmed physical readings.
 - Real always-listening / hands-free "Hey SENTRA" wake-word recognition;
   button-triggered WAV is the currently compiled firmware path.

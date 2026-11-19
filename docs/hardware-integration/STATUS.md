@@ -16,7 +16,8 @@ prior completion report. Hardware performance has not been measured.
   `esp32s3` job (runs without physical hardware); don't claim success without a green run.
 - Physical WM8960 microphone capture and headset playback.
 - Dual VL53L0X ranging, XSHUT remapping, ground-change calibration.
-- MPU6050 register-reading code is present but requires physical validation;\n  optional INA219 power sensing is not implemented.
+- MPU6050 register-reading code is present but requires physical validation;
+  optional INA219 power sensing is not implemented.
 - Standalone, fully integrated hands-free "Hey SENTRA".
 - Reliable camera capture across the intended headband-to-bag cable.
 - Independent real-world walking guidance, SLAM or certified obstacle safety.
