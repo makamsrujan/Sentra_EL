@@ -64,6 +64,13 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
   const [simForwardCm, setSimForwardCm] = useState(150);
   const [simDownwardMm, setSimDownwardMm] = useState(85);
   const [simBatteryPct, setSimBatteryPct] = useState(80);
+  const [simOperatorToken, setSimOperatorToken] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem('sentra.operator.token') || '';
+    } catch {
+      return '';
+    }
+  });
   const [simFeedback, setSimFeedback] = useState<string | null>(null);
   const [analyticsDeviceFilter, setAnalyticsDeviceFilter] = useState<string>('all');
 
@@ -92,11 +99,14 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
     if (overrides?.batteryPercent !== undefined) setSimBatteryPct(bat);
 
     try {
-      await sendSimulatedTelemetry({
-        forwardDistanceCm: fwd,
-        downwardDistanceMm: down,
-        batteryPercent: bat,
-      });
+      await sendSimulatedTelemetry(
+        {
+          forwardDistanceCm: fwd,
+          downwardDistanceMm: down,
+          batteryPercent: bat,
+        },
+        simOperatorToken.trim() || undefined
+      );
       setSimFeedback(`Sent simulated packet (Forward: ${fwd} cm, Downward: ${down} mm, Battery: ${bat}%).`);
       onRefreshAnalytics();
     } catch (err: any) {
@@ -107,8 +117,8 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
   const pushSimFrame = async () => {
     try {
       const dataUrl = generateDemoRoomDataUrl(0);
-      await sendSimulatedFrame(dataUrl);
-      setSimFeedback('Uploaded test JPEG frame to SIM-ESP32-01. Select ESP32-S3 Camera & SIM-ESP32-01 to preview.');
+      await sendSimulatedFrame(dataUrl, simOperatorToken.trim() || undefined);
+      setSimFeedback('Uploaded test JPEG frame to SIM-ESP32-01. Select Wearable Camera & SIM-ESP32-01 to preview.');
     } catch (err: any) {
       setSimFeedback(err?.message || 'Simulated frame upload failed.');
     }
@@ -299,7 +309,7 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-bold text-lg text-primary">
             <BarChart3 className="h-5 w-5" />
-            <span>Device & Sensor Analytics</span>
+            <span>Device & Analytics</span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -560,6 +570,22 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
 
         {showSimulator && (
           <div className="space-y-3 pt-3 border-t border-border/50">
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="password"
+                value={simOperatorToken}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setSimOperatorToken(val);
+                  try {
+                    sessionStorage.setItem('sentra.operator.token', val);
+                  } catch {}
+                }}
+                placeholder="Operator Token (SENTRA_OPERATOR_TOKEN)"
+                className="flex-1 min-w-[220px] rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-mono text-foreground"
+              />
+            </div>
+
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"

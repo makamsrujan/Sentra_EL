@@ -2,12 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { playChime } from '../utils/audio';
 
 export type VoiceAssistantState =
-  | 'standby'
+  | 'disabled'
+  | 'starting'
   | 'wake_listening'
   | 'command_listening'
   | 'processing'
   | 'speaking'
+  | 'permission_blocked'
+  | 'unsupported'
   | 'error';
+
+export type VoiceListenMode = 'idle' | 'wake' | 'command' | 'ptt' | 'mic_test';
+export type RecognitionPhase = 'idle' | 'starting' | 'active';
 
 export type VoiceErrorType =
   | 'unsupported'
@@ -40,8 +46,8 @@ const WAKE_PHRASE_REGEX =
   /\b(?:hey|okay|ok)\s*,?\s*(?:sentra|centra|sendra)\b[\s,.:;!?-]*(.*)$/i;
 
 /**
- * Pure parser that detects "Hey SENTRA" wake phrases, extracts any inline command,
- * and recognizes interruption commands ("Stop", "Cancel", "Be quiet").
+ * Pure parser that detects "Hey SENTRA" wake phrases across full or multi-segment transcripts,
+ * extracts any inline command, and recognizes interruption commands ("Stop", "Cancel", "Be quiet").
  */
 export function extractWakePhraseCommand(transcript: string): WakeParseResult {
   const clean = transcript.replace(/\s+/g, ' ').trim();
@@ -52,7 +58,9 @@ export function extractWakePhraseCommand(transcript: string): WakeParseResult {
   const wakeMatch = clean.match(WAKE_PHRASE_REGEX);
   if (wakeMatch) {
     const trailing = (wakeMatch[1] || '').trim();
-    const isInterrupt = Boolean(trailing && INTERRUPT_REGEX.test(trailing) && trailing.split(/\s+/).length <= 4);
+    const isInterrupt = Boolean(
+      trailing && INTERRUPT_REGEX.test(trailing) && trailing.split(/\s+/).length <= 4
+    );
     return {
       detected: true,
       command: trailing,
@@ -60,7 +68,6 @@ export function extractWakePhraseCommand(transcript: string): WakeParseResult {
     };
   }
 
-  // Standalone short interruption utterances
   if (INTERRUPT_REGEX.test(clean) && clean.split(/\s+/).length <= 5) {
     return {
       detected: false,
@@ -74,6 +81,71 @@ export function extractWakePhraseCommand(transcript: string): WakeParseResult {
     command: '',
     isInterrupt: false,
   };
+}
+
+/**
+ * Combines segments from SpeechRecognitionEvent.results starting at `offsetIndex`
+ * so phrases split across multiple result segments ("Hey" + "SENTRA, what is around me?") still match reliably.
+ */
+export function combineResultSegments(
+  results: ArrayLike<{ isFinal?: boolean; 0?: { transcript?: string } }>,
+  offsetIndex = 0
+): { fullText: string; latestSegmentFinal: boolean } {
+  const pieces: string[] = [];
+  let latestSegmentFinal = false;
+  const start = Math.max(0, offsetIndex);
+  for (let i = start; i < results.length; i++) {
+    const item = results[i];
+    const txt = (item?.[0]?.transcript || '').trim();
+    if (txt) pieces.push(txt);
+    latestSegmentFinal = Boolean(item?.isFinal);
+  }
+  return {
+    fullText: pieces.join(' ').replace(/\s+/g, ' ').trim(),
+    latestSegmentFinal,
+  };
+}
+
+export function deriveVoiceAssistantState(params: {
+  speechRecognitionSupported: boolean;
+  voiceErrorType: VoiceErrorType;
+  isProcessing: boolean;
+  isSpeaking: boolean;
+  listenMode: VoiceListenMode;
+  recognitionPhase: RecognitionPhase;
+  wakeWordEnabled: boolean;
+}): VoiceAssistantState {
+  if (!params.speechRecognitionSupported) {
+    return 'unsupported';
+  }
+  if (
+    params.voiceErrorType === 'permission_denied' ||
+    params.voiceErrorType === 'blocked_by_embed' ||
+    params.voiceErrorType === 'https_required' ||
+    params.voiceErrorType === 'service_not_allowed'
+  ) {
+    return 'permission_blocked';
+  }
+  if (params.voiceErrorType) {
+    return 'error';
+  }
+  if (params.isProcessing) {
+    return 'processing';
+  }
+  if (params.isSpeaking) {
+    return 'speaking';
+  }
+  if (params.listenMode === 'command' || params.listenMode === 'ptt') {
+    return params.recognitionPhase === 'active' ? 'command_listening' : 'starting';
+  }
+  if (params.listenMode === 'wake') {
+    // Never claim wake_listening until onstart actually fires ('active')
+    return params.recognitionPhase === 'active' ? 'wake_listening' : 'starting';
+  }
+  if (params.listenMode === 'mic_test') {
+    return params.recognitionPhase === 'active' ? 'command_listening' : 'starting';
+  }
+  return params.wakeWordEnabled ? 'disabled' : 'disabled';
 }
 
 export function classifySpeechError(
@@ -98,17 +170,18 @@ export function classifySpeechError(
         fatalForLoop: true,
       };
     }
-    if (env.permissionsPolicyBlocked || env.isEmbedded) {
+    if (env.permissionsPolicyBlocked) {
       return {
         type: 'blocked_by_embed',
         message:
-          'Microphone access is blocked inside this embedded preview or permission denied. Open SENTRA directly in an HTTPS tab or grant mic access.',
+          'Microphone access is blocked by this embedded preview Permissions Policy. Open SENTRA directly in a top-level HTTPS tab.',
         fatalForLoop: true,
       };
     }
     return {
       type: 'permission_denied',
-      message: 'Microphone permission was denied. Allow microphone access in browser settings and tap Restart Mic.',
+      message:
+        'Microphone permission was denied. Allow microphone access in browser settings and tap Restart Mic.',
       fatalForLoop: true,
     };
   }
@@ -210,22 +283,29 @@ export function useVoiceAssistant({
   onInterrupt,
   onUnsupportedFallback,
 }: UseVoiceAssistantOptions) {
-  const [listenMode, setListenMode] = useState<'idle' | 'wake' | 'command' | 'ptt'>('idle');
+  const [listenMode, setListenMode] = useState<VoiceListenMode>('idle');
+  const [recognitionPhase, setRecognitionPhase] = useState<RecognitionPhase>('idle');
   const [liveTranscript, setLiveTranscript] = useState<string>('');
   const [voiceErrorType, setVoiceErrorType] = useState<VoiceErrorType>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [wakeActivatedNotice, setWakeActivatedNotice] = useState(false);
 
+  // Explicit microphone recognition test state
+  const [micTestActive, setMicTestActive] = useState(false);
+  const [micTestTranscript, setMicTestTranscript] = useState<string>('');
+  const [micTestError, setMicTestError] = useState<string | null>(null);
+
   const compatibility = useMemo(() => getVoiceCompatibilityInfo(), []);
 
-  // Mutable refs for race-free single-session management
   const recognitionRef = useRef<any>(null);
   const sessionIdRef = useRef<number>(0);
-  const listenModeRef = useRef<'idle' | 'wake' | 'command' | 'ptt'>('idle');
+  const listenModeRef = useRef<VoiceListenMode>('idle');
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const commandTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wakeSettleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inlineCommandTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wakeOffsetRef = useRef<number>(0);
 
   const wakeWordEnabledRef = useRef(wakeWordEnabled);
   wakeWordEnabledRef.current = wakeWordEnabled;
@@ -247,8 +327,11 @@ export function useVoiceAssistant({
   const pttCapturedRef = useRef<string>('');
   const rapidEmptyRestartsRef = useRef<number>(0);
   const lastSessionStartRef = useRef<number>(0);
+  const isVisibleRef = useRef<boolean>(
+    typeof document === 'undefined' ? true : document.visibilityState !== 'hidden'
+  );
 
-  const setMode = useCallback((next: 'idle' | 'wake' | 'command' | 'ptt') => {
+  const setMode = useCallback((next: VoiceListenMode) => {
     listenModeRef.current = next;
     setListenMode(next);
   }, []);
@@ -266,11 +349,16 @@ export function useVoiceAssistant({
       clearTimeout(wakeSettleTimerRef.current);
       wakeSettleTimerRef.current = null;
     }
+    if (inlineCommandTimerRef.current) {
+      clearTimeout(inlineCommandTimerRef.current);
+      inlineCommandTimerRef.current = null;
+    }
   }, []);
 
   const cleanupRecognition = useCallback(() => {
     sessionIdRef.current += 1;
     clearAllTimers();
+    setRecognitionPhase('idle');
     const rec = recognitionRef.current;
     recognitionRef.current = null;
     if (rec) {
@@ -304,7 +392,7 @@ export function useVoiceAssistant({
     try {
       const policy = (document as any).permissionsPolicy || (document as any).featurePolicy;
       if (policy && typeof policy.allowsFeature === 'function') {
-        permissionsPolicyBlocked = !policy.allowsFeature('microphone');
+        permissionsPolicyBlocked = policy.allowsFeature('microphone') === false;
       }
     } catch {}
     return { isSecureContext, isEmbedded, permissionsPolicyBlocked };
@@ -331,7 +419,7 @@ export function useVoiceAssistant({
   }, []);
 
   const startSession = useCallback(
-    (targetMode: 'wake' | 'command' | 'ptt') => {
+    (targetMode: Exclude<VoiceListenMode, 'idle'>) => {
       const SpeechRecognitionClass =
         typeof window !== 'undefined'
           ? (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
@@ -339,43 +427,74 @@ export function useVoiceAssistant({
 
       if (!SpeechRecognitionClass) {
         setVoiceErrorType('unsupported');
-        setVoiceError('Web Speech Recognition is not supported in this browser. Use typed input below.');
+        setVoiceError(
+          'Web Speech Recognition is not supported in this browser. Use typed input below.'
+        );
+        if (targetMode === 'mic_test') {
+          setMicTestActive(false);
+          setMicTestError('Web Speech Recognition is not supported in this browser.');
+        }
         setMode('idle');
         onUnsupportedFallbackRef.current?.();
         return false;
       }
 
+      if (targetMode === 'wake' && !isVisibleRef.current) {
+        setMode('idle');
+        setRecognitionPhase('idle');
+        return false;
+      }
+
       const env = getMicEnvironmentFlags();
       if (!env.isSecureContext) {
+        const msg = 'Microphone access requires HTTPS or localhost.';
         setVoiceErrorType('https_required');
-        setVoiceError('Microphone access requires HTTPS or localhost.');
+        setVoiceError(msg);
+        if (targetMode === 'mic_test') {
+          setMicTestActive(false);
+          setMicTestError(msg);
+        }
         setMode('idle');
         return false;
       }
       if (env.permissionsPolicyBlocked) {
+        const msg = 'Microphone is blocked by this embedded preview Permissions Policy.';
         setVoiceErrorType('blocked_by_embed');
-        setVoiceError('Microphone is blocked by this embedded iframe Permissions Policy.');
+        setVoiceError(msg);
+        if (targetMode === 'mic_test') {
+          setMicTestActive(false);
+          setMicTestError(msg);
+        }
         setMode('idle');
         return false;
       }
 
-      // Enforce single active recognition instance
       cleanupRecognition();
 
       const mySessionId = sessionIdRef.current;
       try {
         const rec = new SpeechRecognitionClass();
         rec.lang = navigator.language || 'en-US';
-        rec.continuous = targetMode === 'wake';
+        rec.continuous = targetMode === 'wake' || targetMode === 'mic_test';
         rec.interimResults = true;
         rec.maxAlternatives = 1;
 
         recognitionRef.current = rec;
         pttCapturedRef.current = '';
+        wakeOffsetRef.current = 0;
         lastSessionStartRef.current = Date.now();
         setMode(targetMode);
+        setRecognitionPhase('starting');
         setVoiceError(null);
         setVoiceErrorType(null);
+
+        if (targetMode === 'mic_test') {
+          setMicTestActive(true);
+          setMicTestError(null);
+          setMicTestTranscript('');
+        } else {
+          setMicTestActive(false);
+        }
 
         if (targetMode === 'command') {
           if (audioFeedbackRef.current) {
@@ -396,27 +515,33 @@ export function useVoiceAssistant({
           }
         }
 
+        rec.onstart = () => {
+          if (sessionIdRef.current !== mySessionId) return;
+          lastSessionStartRef.current = Date.now();
+          setRecognitionPhase('active');
+        };
+
         rec.onresult = (event: any) => {
           if (sessionIdRef.current !== mySessionId) return;
 
-          // Never allow assistant speech to self-trigger wake recognition
+          if (targetMode === 'mic_test') {
+            const combined = combineResultSegments(event.results, 0);
+            if (combined.fullText) {
+              setMicTestTranscript(combined.fullText);
+            }
+            return;
+          }
+
+          // Never allow assistant speech output to self-trigger wake recognition
           if (targetMode === 'wake' && isSpeakingRef.current) {
             return;
           }
 
-          let latestText = '';
-          let hasFinal = false;
-
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            const res = event.results[i];
-            const piece = (res?.[0]?.transcript || '').trim();
-            if (piece) {
-              latestText = latestText ? `${latestText} ${piece}` : piece;
-            }
-            if (res.isFinal) {
-              hasFinal = true;
-            }
-          }
+          const offset = targetMode === 'wake' ? wakeOffsetRef.current : 0;
+          const { fullText: latestText, latestSegmentFinal } = combineResultSegments(
+            event.results,
+            offset
+          );
 
           if (!latestText) return;
           rapidEmptyRestartsRef.current = 0;
@@ -424,7 +549,7 @@ export function useVoiceAssistant({
           if (targetMode === 'ptt') {
             pttCapturedRef.current = latestText;
             setLiveTranscript(latestText);
-            if (hasFinal) {
+            if (latestSegmentFinal) {
               cleanupRecognition();
               setMode('idle');
               setLiveTranscript('');
@@ -435,7 +560,7 @@ export function useVoiceAssistant({
 
           if (targetMode === 'command') {
             setLiveTranscript(latestText);
-            if (hasFinal) {
+            if (latestSegmentFinal) {
               cleanupRecognition();
               setMode('idle');
               setLiveTranscript('');
@@ -443,7 +568,9 @@ export function useVoiceAssistant({
               if (wakeCheck.isInterrupt) {
                 onInterruptRef.current();
               } else {
-                submitTranscriptOnce(wakeCheck.detected && wakeCheck.command ? wakeCheck.command : latestText);
+                submitTranscriptOnce(
+                  wakeCheck.detected && wakeCheck.command ? wakeCheck.command : latestText
+                );
               }
             }
             return;
@@ -452,6 +579,7 @@ export function useVoiceAssistant({
           // targetMode === 'wake'
           const parsed = extractWakePhraseCommand(latestText);
           if (parsed.isInterrupt) {
+            wakeOffsetRef.current = event.results.length;
             cleanupRecognition();
             setMode('idle');
             setLiveTranscript('');
@@ -467,40 +595,78 @@ export function useVoiceAssistant({
               clearTimeout(wakeSettleTimerRef.current);
               wakeSettleTimerRef.current = null;
             }
+            if (inlineCommandTimerRef.current) {
+              clearTimeout(inlineCommandTimerRef.current);
+              inlineCommandTimerRef.current = null;
+            }
 
-            if (parsed.command && hasFinal) {
-              cleanupRecognition();
-              setMode('idle');
-              setLiveTranscript('');
-              if (audioFeedbackRef.current) {
-                playChime('start_listen');
+            if (parsed.command) {
+              const capturedCmd = parsed.command;
+              if (latestSegmentFinal) {
+                wakeOffsetRef.current = event.results.length;
+                cleanupRecognition();
+                setMode('idle');
+                setLiveTranscript('');
+                if (audioFeedbackRef.current) {
+                  playChime('start_listen');
+                }
+                submitTranscriptOnce(capturedCmd);
+                return;
               }
-              submitTranscriptOnce(parsed.command);
+
+              // Wait 1250ms after the last interim change before submitting so full questions
+              // ("Hey SENTRA, what is around me?" / "Hey SENTRA, find my bottle") aren't clipped
+              inlineCommandTimerRef.current = setTimeout(() => {
+                if (sessionIdRef.current !== mySessionId) return;
+                wakeOffsetRef.current = event.results.length;
+                cleanupRecognition();
+                setMode('idle');
+                setLiveTranscript('');
+                if (audioFeedbackRef.current) {
+                  playChime('start_listen');
+                }
+                submitTranscriptOnce(capturedCmd);
+              }, 1250);
               return;
             }
 
-            if (!parsed.command) {
-              if (hasFinal) {
-                // User paused after saying "Hey SENTRA" -> transition cleanly to active command window
+            // User said standalone "Hey SENTRA" without trailing command yet
+            if (latestSegmentFinal) {
+              wakeOffsetRef.current = event.results.length;
+              cleanupRecognition();
+              setLiveTranscript('');
+              startSession('command');
+            } else {
+              // Give 900ms in case user continues speaking "...what is around me?" in the next interim chunk
+              wakeSettleTimerRef.current = setTimeout(() => {
+                if (sessionIdRef.current !== mySessionId) return;
+                wakeOffsetRef.current = event.results.length;
                 cleanupRecognition();
                 setLiveTranscript('');
                 startSession('command');
-              } else {
-                // Wait briefly in case user continues speaking "...find my keys" in same phrase
-                wakeSettleTimerRef.current = setTimeout(() => {
-                  if (sessionIdRef.current !== mySessionId) return;
-                  cleanupRecognition();
-                  setLiveTranscript('');
-                  startSession('command');
-                }, 750);
-              }
+              }, 900);
             }
+          } else if (latestSegmentFinal && event.results.length - wakeOffsetRef.current > 8) {
+            // Keep sliding buffer compact during long quiet/ambient chatter
+            wakeOffsetRef.current = Math.max(0, event.results.length - 2);
           }
         };
 
         rec.onerror = (ev: any) => {
           if (sessionIdRef.current !== mySessionId) return;
           const classified = classifySpeechError(ev?.error || '', env);
+
+          if (targetMode === 'mic_test') {
+            if (classified.type) {
+              cleanupRecognition();
+              setMode('idle');
+              setMicTestActive(false);
+              setMicTestError(classified.message);
+              setVoiceErrorType(classified.type);
+              setVoiceError(classified.message);
+            }
+            return;
+          }
 
           if (classified.fatalForLoop) {
             cleanupRecognition();
@@ -511,7 +677,7 @@ export function useVoiceAssistant({
               onWakeWordEnabledChange(false);
             }
           } else {
-            // Transient no-speech or aborted inside wake mode; let onend decide safely
+            // Transient no-speech or aborted
             if (targetMode === 'ptt' || targetMode === 'command') {
               cleanupRecognition();
               setMode('idle');
@@ -524,6 +690,13 @@ export function useVoiceAssistant({
           if (sessionIdRef.current !== mySessionId) return;
           recognitionRef.current = null;
           clearAllTimers();
+          setRecognitionPhase('idle');
+
+          if (targetMode === 'mic_test') {
+            setMicTestActive(false);
+            setMode('idle');
+            return;
+          }
 
           if (targetMode === 'ptt') {
             const captured = pttCapturedRef.current.trim();
@@ -551,8 +724,7 @@ export function useVoiceAssistant({
             rapidEmptyRestartsRef.current = 0;
           }
 
-          // Prevent infinite fast restart loops on browsers that immediately terminate Web Speech
-          if (rapidEmptyRestartsRef.current >= 12) {
+          if (rapidEmptyRestartsRef.current >= 10) {
             setVoiceErrorType('service_not_allowed');
             setVoiceError(
               'Continuous foreground listening ended repeatedly on this browser. Use Hold to Talk or tap Restart Mic.'
@@ -563,13 +735,15 @@ export function useVoiceAssistant({
 
           if (
             wakeWordEnabledRef.current &&
+            isVisibleRef.current &&
             !isProcessingRef.current &&
             !isSpeakingRef.current
           ) {
-            const backoffMs = Math.min(2500, 350 + rapidEmptyRestartsRef.current * 250);
+            const backoffMs = Math.min(3000, 350 + rapidEmptyRestartsRef.current * 300);
             restartTimerRef.current = setTimeout(() => {
               if (
                 wakeWordEnabledRef.current &&
+                isVisibleRef.current &&
                 !isProcessingRef.current &&
                 !isSpeakingRef.current &&
                 listenModeRef.current === 'idle'
@@ -585,8 +759,13 @@ export function useVoiceAssistant({
       } catch (err: any) {
         cleanupRecognition();
         setMode('idle');
+        const msg = err?.message || 'Unable to start speech recognition.';
         setVoiceErrorType('service_not_allowed');
-        setVoiceError(err?.message || 'Unable to start speech recognition.');
+        setVoiceError(msg);
+        if (targetMode === 'mic_test') {
+          setMicTestActive(false);
+          setMicTestError(msg);
+        }
         return false;
       }
     },
@@ -604,6 +783,7 @@ export function useVoiceAssistant({
   const enableWakeWord = useCallback(async (): Promise<boolean> => {
     setVoiceError(null);
     setVoiceErrorType(null);
+    setMicTestActive(false);
 
     if (!compatibility.speechRecognitionSupported) {
       setVoiceErrorType('unsupported');
@@ -620,11 +800,10 @@ export function useVoiceAssistant({
     }
     if (env.permissionsPolicyBlocked) {
       setVoiceErrorType('blocked_by_embed');
-      setVoiceError('Microphone is blocked inside this embedded iframe preview.');
+      setVoiceError('Microphone is blocked inside this embedded preview Permissions Policy.');
       return false;
     }
 
-    // Request explicit microphone permission via getUserMedia and immediately release stream
     if (navigator.mediaDevices?.getUserMedia) {
       try {
         const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -646,7 +825,7 @@ export function useVoiceAssistant({
 
     rapidEmptyRestartsRef.current = 0;
     onWakeWordEnabledChange(true);
-    if (!isProcessingRef.current && !isSpeakingRef.current) {
+    if (isVisibleRef.current && !isProcessingRef.current && !isSpeakingRef.current) {
       return startSession('wake');
     }
     return true;
@@ -663,6 +842,7 @@ export function useVoiceAssistant({
     cleanupRecognition();
     setVoiceError(null);
     setVoiceErrorType(null);
+    setMicTestError(null);
     rapidEmptyRestartsRef.current = 0;
     if (wakeWordEnabledRef.current) {
       return startSession('wake');
@@ -685,7 +865,6 @@ export function useVoiceAssistant({
     }
     if (rec) {
       try {
-        // Call stop() rather than abort() so Safari/Chrome flush any buffered final transcript
         rec.stop();
       } catch {
         cleanupRecognition();
@@ -704,7 +883,80 @@ export function useVoiceAssistant({
     return startSession('command');
   }, [flashWakeActivated, startSession]);
 
-  // Keep wake listening cleanly paused during TTS & Gemini processing, and resume afterward
+  const startMicTest = useCallback(async () => {
+    onInterruptRef.current();
+    setMicTestError(null);
+    setMicTestTranscript('');
+    setVoiceError(null);
+    setVoiceErrorType(null);
+    if (navigator.mediaDevices?.getUserMedia) {
+      try {
+        const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micStream.getTracks().forEach((t) => t.stop());
+      } catch (err: any) {
+        const env = getMicEnvironmentFlags();
+        const name = err?.name || '';
+        const classified = classifySpeechError(
+          name === 'NotFoundError' || name === 'DevicesNotFoundError'
+            ? 'audio-capture'
+            : 'not-allowed',
+          env
+        );
+        setMicTestActive(false);
+        setMicTestError(classified.message);
+        setVoiceErrorType(classified.type);
+        setVoiceError(classified.message);
+        return false;
+      }
+    }
+    return startSession('mic_test');
+  }, [startSession]);
+
+  const stopMicTest = useCallback(() => {
+    setMicTestActive(false);
+    if (listenModeRef.current === 'mic_test') {
+      cleanupRecognition();
+      setMode('idle');
+    }
+  }, [cleanupRecognition, setMode]);
+
+  // Visibility change handler: pause foreground wake recognition when hidden, resume cleanly when visible
+  useEffect(() => {
+    const handleVisibility = () => {
+      const visible = document.visibilityState !== 'hidden';
+      isVisibleRef.current = visible;
+      if (!visible) {
+        if (listenModeRef.current !== 'idle') {
+          cleanupRecognition();
+          setMode('idle');
+          setMicTestActive(false);
+        }
+      } else if (
+        wakeWordEnabledRef.current &&
+        !voiceErrorType &&
+        !isProcessingRef.current &&
+        !isSpeakingRef.current &&
+        listenModeRef.current === 'idle' &&
+        compatibility.speechRecognitionSupported
+      ) {
+        setTimeout(() => {
+          if (
+            wakeWordEnabledRef.current &&
+            isVisibleRef.current &&
+            !isProcessingRef.current &&
+            !isSpeakingRef.current &&
+            listenModeRef.current === 'idle'
+          ) {
+            startSession('wake');
+          }
+        }, 350);
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [cleanupRecognition, compatibility.speechRecognitionSupported, setMode, startSession, voiceErrorType]);
+
+  // Pause wake listening during TTS & Gemini processing, and deterministically resume afterward
   useEffect(() => {
     if (isSpeaking || isProcessing) {
       if (listenModeRef.current === 'wake') {
@@ -716,13 +968,15 @@ export function useVoiceAssistant({
 
     if (
       wakeWordEnabled &&
+      isVisibleRef.current &&
       !voiceErrorType &&
-      listenModeRef.current === 'idle' &&
+      listenMode === 'idle' &&
       compatibility.speechRecognitionSupported
     ) {
       const resumeTimer = setTimeout(() => {
         if (
           wakeWordEnabledRef.current &&
+          isVisibleRef.current &&
           !isProcessingRef.current &&
           !isSpeakingRef.current &&
           listenModeRef.current === 'idle'
@@ -736,6 +990,7 @@ export function useVoiceAssistant({
     wakeWordEnabled,
     isSpeaking,
     isProcessing,
+    listenMode,
     voiceErrorType,
     compatibility.speechRecognitionSupported,
     cleanupRecognition,
@@ -743,7 +998,6 @@ export function useVoiceAssistant({
     startSession,
   ]);
 
-  // Clean shutdown on unmount
   useEffect(() => {
     return () => {
       cleanupRecognition();
@@ -751,31 +1005,35 @@ export function useVoiceAssistant({
     };
   }, [cleanupRecognition]);
 
-  const assistantState: VoiceAssistantState = voiceErrorType
-    ? 'error'
-    : isProcessing
-    ? 'processing'
-    : isSpeaking
-    ? 'speaking'
-    : listenMode === 'command' || listenMode === 'ptt'
-    ? 'command_listening'
-    : listenMode === 'wake' || wakeWordEnabled
-    ? 'wake_listening'
-    : 'standby';
+  const assistantState: VoiceAssistantState = deriveVoiceAssistantState({
+    speechRecognitionSupported: compatibility.speechRecognitionSupported,
+    voiceErrorType,
+    isProcessing,
+    isSpeaking,
+    listenMode,
+    recognitionPhase,
+    wakeWordEnabled,
+  });
 
   return {
     assistantState,
     listenMode,
+    recognitionPhase,
     liveTranscript,
     wakeActivatedNotice,
     voiceError,
     voiceErrorType,
     compatibility,
+    micTestActive,
+    micTestTranscript,
+    micTestError,
     enableWakeWord,
     disableWakeWord,
     restartMicrophone,
     startPushToTalk,
     stopPushToTalk,
     activateCommandWindow,
+    startMicTest,
+    stopMicTest,
   };
 }

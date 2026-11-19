@@ -129,6 +129,7 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
       facingMode,
       selectedDeviceId,
       autoStart: false,
+      onClearSelectedDeviceId: () => onSelectDeviceId(null),
     });
 
     const wearableFrames = useWearableFrames({
@@ -579,8 +580,12 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                           ? 'Starting Live Camera…'
                           : camera.errorType === 'blocked_by_embed'
                           ? 'Camera Blocked by Embedded Preview'
+                          : camera.errorType === 'os_permission_denied'
+                          ? 'OS Camera Privacy Blocked'
                           : camera.errorType === 'permission_denied'
                           ? 'Camera Permission Denied'
+                          : camera.errorType === 'invalid_device_id'
+                          ? 'Selected Camera Unavailable'
                           : camera.errorType === 'https_required'
                           ? 'HTTPS Required for Camera'
                           : camera.errorType === 'unsupported'
@@ -623,17 +628,19 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
                         </span>
                       </button>
 
-                      {camera.errorType === 'blocked_by_embed' && typeof window !== 'undefined' && (
-                        <a
-                          href={window.location.href}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-secondary border border-border px-4 py-2.5 text-xs font-bold text-foreground hover:border-primary"
-                        >
-                          <ExternalLink className="h-3.5 w-3.5 text-primary" />
-                          <span>Open Direct HTTPS Tab</span>
-                        </a>
-                      )}
+                      {(camera.errorType === 'blocked_by_embed' ||
+                        (camera.status === 'error' && camera.isEmbedded)) &&
+                        typeof window !== 'undefined' && (
+                          <a
+                            href={window.location.href}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl bg-secondary border border-border px-4 py-2.5 text-xs font-bold text-foreground hover:border-primary"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5 text-primary" />
+                            <span>Open Direct HTTPS Tab</span>
+                          </a>
+                        )}
                     </div>
                   </div>
                 </div>

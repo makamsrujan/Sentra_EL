@@ -6,6 +6,7 @@ import path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { createSentraApp } from '../server';
 import { SentraEventStore } from '../server/eventStore';
+import { validateConfiguredModel } from '../server/geminiService';
 import { sanitizeGeminiResponse } from '../server/validation';
 
 const VALID_JPEG_HEADER = Buffer.from([
@@ -20,13 +21,17 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
   let baseUrl: string;
   let provisionedToken: string;
   const deviceId = 'ESP32-TEST-01';
+  const testOperatorToken = 'sentra-test-operator-secret-123';
   const prevApiKey = process.env.GEMINI_API_KEY;
   const prevSimEnabled = process.env.SENTRA_SIMULATOR_ENABLED;
+  const prevOpToken = process.env.SENTRA_OPERATOR_TOKEN;
+  const prevModel = process.env.SENTRA_GEMINI_MODEL;
 
   beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sentra-test-'));
     dbPath = path.join(tmpDir, 'sentra-test.db');
     process.env.SENTRA_SIMULATOR_ENABLED = 'true';
+    process.env.SENTRA_OPERATOR_TOKEN = testOperatorToken;
 
     const { app, store } = createSentraApp({ dbPath, heartbeatTimeoutMs: 2500 });
     storeRef = store;
@@ -41,15 +46,61 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
   afterAll(async () => {
     process.env.GEMINI_API_KEY = prevApiKey;
     process.env.SENTRA_SIMULATOR_ENABLED = prevSimEnabled;
+    process.env.SENTRA_OPERATOR_TOKEN = prevOpToken;
+    if (prevModel === undefined) delete process.env.SENTRA_GEMINI_MODEL;
+    else process.env.SENTRA_GEMINI_MODEL = prevModel;
     storeRef?.close();
     await new Promise<void>((resolve) => server.close(() => resolve()));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('registers a real hardware device and issues a one-time token', async () => {
-    const res = await fetch(`${baseUrl}/api/device/register`, {
+  it('requires operator authorization for device registration, simulator endpoints, and telemetry deletion', async () => {
+    // Missing operator token -> 401
+    const unauthReg = await fetch(`${baseUrl}/api/device/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: 'UNAUTH-01',
+        name: 'Unauth',
+        capabilities: { camera: false, forwardToF: true, downwardToF: false, imu: false, audioOutput: false },
+      }),
+    });
+    expect(unauthReg.status).toBe(401);
+
+    // Missing SENTRA_OPERATOR_TOKEN on server -> 503 locked fail-closed
+    delete process.env.SENTRA_OPERATOR_TOKEN;
+    const lockedReg = await fetch(`${baseUrl}/api/device/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Operator-Token': testOperatorToken },
+      body: JSON.stringify({
+        deviceId: 'UNAUTH-02',
+        name: 'Locked',
+        capabilities: { camera: false, forwardToF: true, downwardToF: false, imu: false, audioOutput: false },
+      }),
+    });
+    expect(lockedReg.status).toBe(503);
+
+    const lockedSim = await fetch(`${baseUrl}/api/device/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sentra-Simulator': 'true' },
+      body: JSON.stringify({ forwardDistanceCm: 100 }),
+    });
+    expect(lockedSim.status).toBe(503);
+
+    const lockedDelete = await fetch(`${baseUrl}/api/events`, { method: 'DELETE' });
+    expect(lockedDelete.status).toBe(503);
+
+    // Restore operator token for remaining tests
+    process.env.SENTRA_OPERATOR_TOKEN = testOperatorToken;
+  });
+
+  it('registers a real hardware device with valid operator credentials and issues a one-time token', async () => {
+    const res = await fetch(`${baseUrl}/api/device/register`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Operator-Token': testOperatorToken,
+      },
       body: JSON.stringify({
         deviceId,
         name: 'Test Headband',
@@ -231,19 +282,27 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
     expect(pollData3.actions.some((a: any) => a.id === actionId)).toBe(false);
   });
 
-  it('separates simulator writes strictly from real hardware state and requires confirmation header', async () => {
+  it('separates simulator writes strictly from real hardware state and requires confirmation header + operator auth', async () => {
     const blockedRes = await fetch(`${baseUrl}/api/device/simulate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Operator-Token': testOperatorToken },
       body: JSON.stringify({ forwardDistanceCm: 100 }),
     });
     expect(blockedRes.status).toBe(403);
+
+    const noAuthSimRes = await fetch(`${baseUrl}/api/device/simulate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sentra-Simulator': 'true' },
+      body: JSON.stringify({ forwardDistanceCm: 100 }),
+    });
+    expect(noAuthSimRes.status).toBe(401);
 
     const simRes = await fetch(`${baseUrl}/api/device/simulate`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Sentra-Simulator': 'true',
+        'X-Operator-Token': testOperatorToken,
       },
       body: JSON.stringify({ forwardDistanceCm: 95, downwardDistanceMm: 90, batteryPercent: 55 }),
     });
@@ -335,8 +394,63 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
     reopened.close();
   });
 
-  it('truthfully reports MISSING_API_KEY and NO_FRESH_IMAGE in /api/sentra/analyze without fabricating objects', async () => {
+  it('truthfully reports MISSING_API_KEY, UNSUPPORTED_MODEL without silent substitution, and allows conversation without image', async () => {
     delete process.env.GEMINI_API_KEY;
+    delete process.env.SENTRA_GEMINI_MODEL;
+
+    // Supports gemini-3.6-flash and gemini-3.8-flash explicitly
+    process.env.SENTRA_GEMINI_MODEL = 'gemini-3.6-flash';
+    expect(validateConfiguredModel()).toMatchObject({ valid: true, configuredModel: 'gemini-3.6-flash' });
+    process.env.SENTRA_GEMINI_MODEL = 'gemini-3.8-flash';
+    expect(validateConfiguredModel()).toMatchObject({ valid: true, configuredModel: 'gemini-3.8-flash' });
+
+    // Never silently substitutes an unrecognized model
+    process.env.SENTRA_GEMINI_MODEL = 'nonexistent-model-xyz';
+    expect(validateConfiguredModel().valid).toBe(false);
+
+    const badModelDiagRes = await fetch(`${baseUrl}/api/gemini/diagnostic`, { method: 'POST' });
+    const badModelDiag = await badModelDiagRes.json();
+    expect(badModelDiag.ok).toBe(false);
+    expect(badModelDiag.errorCode).toBe('UNSUPPORTED_MODEL');
+    expect(badModelDiag.configuredModel).toBe('nonexistent-model-xyz');
+
+    const badModelAnalyzeRes = await fetch(`${baseUrl}/api/sentra/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'ask',
+        operation: 'conversation',
+        query: 'What time should I take medicine?',
+        image: null,
+        wearableDeviceId: 'UNCONNECTED-DEVICE',
+      }),
+    });
+    const badModelAnalyze = await badModelAnalyzeRes.json();
+    expect(badModelAnalyze.errorCode).toBe('UNSUPPORTED_MODEL');
+
+    delete process.env.SENTRA_GEMINI_MODEL;
+
+    // Diagnostic with missing API key returns explicit MISSING_API_KEY (never claims connected)
+    const missingKeyDiagRes = await fetch(`${baseUrl}/api/gemini/diagnostic`, { method: 'POST' });
+    const missingKeyDiag = await missingKeyDiagRes.json();
+    expect(missingKeyDiag.ok).toBe(false);
+    expect(missingKeyDiag.errorCode).toBe('MISSING_API_KEY');
+    expect(missingKeyDiag.apiReachable).toBe(false);
+
+    // General conversational question without camera image proceeds past image gate to MISSING_API_KEY
+    const convNoImgRes = await fetch(`${baseUrl}/api/sentra/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'ask',
+        operation: 'conversation',
+        query: 'Tell me a quick joke',
+        image: null,
+        wearableDeviceId: 'UNCONNECTED-DEVICE',
+      }),
+    });
+    const convNoImg = await convNoImgRes.json();
+    expect(convNoImg.errorCode).toBe('MISSING_API_KEY');
 
     // When a device without an active hardware hazard has no frame -> observation_unavailable
     const noImgRes = await fetch(`${baseUrl}/api/sentra/analyze`, {

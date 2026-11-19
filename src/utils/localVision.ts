@@ -137,7 +137,7 @@ export function analyzeLocalScene(
   if (goal && memories.length > 0) {
     const match = memories.find((m) => m.label.toLowerCase().includes(goal.toLowerCase()));
     if (match) {
-      closestMemoryGuidance = `I have a previously saved note for ${match.label} (${match.note}), but I cannot confirm it is still there without cloud object recognition.`;
+      closestMemoryGuidance = `I have a previously saved note for ${match.label} (${match.note}), but I cannot confirm it is still there without live AI Visual Analysis.`;
     }
   }
 
@@ -159,13 +159,13 @@ export function analyzeLocalScene(
       : '';
 
   if (mode === 'find') {
-    text = `The camera is active (light ${lightLevel}%, center tone ${dominantColor}), but object recognition is currently unavailable. ${closestMemoryGuidance || ''}`.trim();
+    text = `The camera is active (light ${lightLevel}%, center tone ${dominantColor}), but AI Visual Analysis is currently unavailable. ${closestMemoryGuidance || ''}`.trim();
   } else if (mode === 'read') {
     text = hasTextPattern
-      ? `The camera is active and detects high-contrast edges consistent with printed text (light ${lightLevel}%), but cloud text reading is currently unavailable.`
-      : `The camera is active (light ${lightLevel}%), and cloud text reading is currently unavailable.`;
+      ? `The camera is active and detects high-contrast edges consistent with printed text (light ${lightLevel}%), but AI text reading is currently unavailable.`
+      : `The camera is active (light ${lightLevel}%), and AI text reading is currently unavailable.`;
   } else {
-    text = `The camera is active, but cloud scene recognition is unavailable. ${headingText} Light level is ${lightLevel}% (${lightDirection}) with a mostly ${dominantColor} center view.`.trim();
+    text = `The camera is active, but AI scene recognition is unavailable. ${headingText} Light level is ${lightLevel}% (${lightDirection}) with a mostly ${dominantColor} center view.`.trim();
   }
 
   return {

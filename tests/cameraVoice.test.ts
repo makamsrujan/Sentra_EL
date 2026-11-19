@@ -4,13 +4,16 @@ import { describe, expect, it } from 'vitest';
 import { classifyCameraError } from '../src/services/cameraService';
 import {
   classifySpeechError,
+  combineResultSegments,
+  deriveVoiceAssistantState,
   extractWakePhraseCommand,
 } from '../src/hooks/useVoiceAssistant';
+import { validateWearableFramePayload } from '../src/hooks/useWearableFrames';
 import { parseVoiceIntent } from '../src/utils/parser';
 
 describe('SENTRA Camera Diagnostics & Error Classification', () => {
-  it('distinguishes iframe Permissions Policy / embed blocks from user permission denial', () => {
-    const res = classifyCameraError(
+  it('distinguishes verified iframe Permissions Policy blocks from OS blocks and site permission denials', () => {
+    const resPolicyBlocked = classifyCameraError(
       { name: 'NotAllowedError', message: 'Permission denied' },
       {
         isSecureContext: true,
@@ -20,9 +23,22 @@ describe('SENTRA Camera Diagnostics & Error Classification', () => {
         permissionState: 'prompt',
       }
     );
-    expect(res.type).toBe('blocked_by_embed');
+    expect(resPolicyBlocked.type).toBe('blocked_by_embed');
 
-    const resTopLevelIframeGranted = classifyCameraError(
+    // Inside iframe WITHOUT permissionsPolicyBlocked & WITHOUT explicit policy msg -> should NOT blame embed blindly
+    const resIframeGrantedOsDenied = classifyCameraError(
+      { name: 'NotAllowedError', message: 'Permission denied by system' },
+      {
+        isSecureContext: true,
+        apiSupported: true,
+        isEmbeddedIframe: true,
+        permissionsPolicyBlocked: false,
+        permissionState: 'granted',
+      }
+    );
+    expect(resIframeGrantedOsDenied.type).toBe('os_permission_denied');
+
+    const resExplicitPolicyMsg = classifyCameraError(
       { name: 'NotAllowedError', message: 'Disallowed by feature policy' },
       {
         isSecureContext: true,
@@ -32,7 +48,7 @@ describe('SENTRA Camera Diagnostics & Error Classification', () => {
         permissionState: 'granted',
       }
     );
-    expect(resTopLevelIframeGranted.type).toBe('blocked_by_embed');
+    expect(resExplicitPolicyMsg.type).toBe('blocked_by_embed');
 
     const resUserDenied = classifyCameraError(
       { name: 'NotAllowedError', message: 'Permission dismissed or denied' },
@@ -61,7 +77,7 @@ describe('SENTRA Camera Diagnostics & Error Classification', () => {
     expect(res.type).toBe('https_required');
   });
 
-  it('classifies camera-in-use and missing camera hardware accurately', () => {
+  it('classifies camera-in-use, invalid device IDs, and missing camera hardware accurately', () => {
     const baseEnv = {
       isSecureContext: true,
       apiSupported: true,
@@ -72,26 +88,97 @@ describe('SENTRA Camera Diagnostics & Error Classification', () => {
 
     expect(classifyCameraError({ name: 'NotReadableError' }, baseEnv).type).toBe('in_use');
     expect(classifyCameraError({ name: 'NotFoundError' }, baseEnv).type).toBe('unavailable');
+    expect(
+      classifyCameraError({ name: 'NotFoundError' }, baseEnv, { hadExplicitDeviceId: true }).type
+    ).toBe('invalid_device_id');
+    expect(classifyCameraError({ name: 'OverconstrainedError' }, baseEnv).type).toBe('invalid_device_id');
   });
 });
 
-describe('SENTRA "Hey SENTRA" Wake Word & Speech Error Handling', () => {
-  it('detects standalone "Hey SENTRA" wake phrase without a command yet', () => {
-    const res = extractWakePhraseCommand('Hey SENTRA');
-    expect(res.detected).toBe(true);
-    expect(res.command).toBe('');
-    expect(res.isInterrupt).toBe(false);
+describe('SENTRA "Hey SENTRA" Wake Word, State Machine & Multi-Segment Handling', () => {
+  it('merges multi-segment transcripts and extracts full inline questions cleanly', () => {
+    const combined = combineResultSegments(
+      [
+        { isFinal: false, 0: { transcript: 'Hey' } },
+        { isFinal: false, 0: { transcript: 'SENTRA what is around me?' } },
+      ],
+      0
+    );
+    expect(combined.fullText).toBe('Hey SENTRA what is around me?');
+
+    const parsed = extractWakePhraseCommand(combined.fullText);
+    expect(parsed.detected).toBe(true);
+    expect(parsed.command).toBe('what is around me?');
+    expect(parsed.isInterrupt).toBe(false);
+
+    const parsedBottle = extractWakePhraseCommand('Hey SENTRA, find my bottle');
+    expect(parsedBottle.detected).toBe(true);
+    expect(parsedBottle.command).toBe('find my bottle');
+    expect(parseVoiceIntent(parsedBottle.command)).toMatchObject({ mode: 'find', goal: 'bottle' });
   });
 
-  it('extracts inline commands following "Hey SENTRA"', () => {
-    const res = extractWakePhraseCommand('Hey, SENTRA what is right in front of me?');
-    expect(res.detected).toBe(true);
-    expect(res.command).toBe('what is right in front of me?');
-    expect(res.isInterrupt).toBe(false);
+  it('enforces event-driven voice states and never reports wake_listening before onstart fires', () => {
+    // Even if wakeWordEnabled is true, idle or starting phase must NOT report wake_listening
+    expect(
+      deriveVoiceAssistantState({
+        speechRecognitionSupported: true,
+        voiceErrorType: null,
+        isProcessing: false,
+        isSpeaking: false,
+        listenMode: 'idle',
+        recognitionPhase: 'idle',
+        wakeWordEnabled: true,
+      })
+    ).toBe('disabled');
 
-    const parsed = parseVoiceIntent('Hey SENTRA find my keys');
-    expect(parsed.mode).toBe('find');
-    expect(parsed.goal).toBe('keys');
+    expect(
+      deriveVoiceAssistantState({
+        speechRecognitionSupported: true,
+        voiceErrorType: null,
+        isProcessing: false,
+        isSpeaking: false,
+        listenMode: 'wake',
+        recognitionPhase: 'starting',
+        wakeWordEnabled: true,
+      })
+    ).toBe('starting');
+
+    // Only transitions to wake_listening when onstart sets recognitionPhase = 'active'
+    expect(
+      deriveVoiceAssistantState({
+        speechRecognitionSupported: true,
+        voiceErrorType: null,
+        isProcessing: false,
+        isSpeaking: false,
+        listenMode: 'wake',
+        recognitionPhase: 'active',
+        wakeWordEnabled: true,
+      })
+    ).toBe('wake_listening');
+
+    expect(
+      deriveVoiceAssistantState({
+        speechRecognitionSupported: true,
+        voiceErrorType: 'permission_denied',
+        isProcessing: false,
+        isSpeaking: false,
+        listenMode: 'idle',
+        recognitionPhase: 'idle',
+        wakeWordEnabled: false,
+      })
+    ).toBe('permission_blocked');
+
+    expect(
+      deriveVoiceAssistantState({
+        speechRecognitionSupported: false,
+        voiceErrorType: null,
+        isProcessing: false,
+        isSpeaking: false,
+        listenMode: 'idle',
+        recognitionPhase: 'idle',
+        wakeWordEnabled: false,
+      })
+    ).toBe('unsupported');
   });
 
   it('recognizes interruption commands ("Stop", "Cancel", "Be quiet")', () => {
@@ -112,10 +199,17 @@ describe('SENTRA "Hey SENTRA" Wake Word & Speech Error Handling', () => {
     expect(
       classifySpeechError('not-allowed', {
         isSecureContext: true,
-        isEmbedded: false,
+        isEmbedded: true,
         permissionsPolicyBlocked: false,
       })
     ).toMatchObject({ type: 'permission_denied', fatalForLoop: true });
+    expect(
+      classifySpeechError('not-allowed', {
+        isSecureContext: true,
+        isEmbedded: true,
+        permissionsPolicyBlocked: true,
+      })
+    ).toMatchObject({ type: 'blocked_by_embed', fatalForLoop: true });
     expect(classifySpeechError('audio-capture')).toMatchObject({
       type: 'mic_disconnected',
       fatalForLoop: true,
@@ -123,9 +217,45 @@ describe('SENTRA "Hey SENTRA" Wake Word & Speech Error Handling', () => {
   });
 });
 
+describe('SENTRA Wearable Frame Payload Consistency', () => {
+  it('rejects mismatched device IDs and invalid image blobs while accepting valid frames', () => {
+    expect(
+      validateWearableFramePayload({
+        expectedDeviceId: 'ESP32-S3-SENTRA-001',
+        responseDeviceIdHeader: 'OTHER-DEVICE',
+        mimeType: 'image/jpeg',
+        byteSize: 4096,
+        frameAgeMs: 250,
+        staleFlag: false,
+      }).ok
+    ).toBe(false);
+
+    expect(
+      validateWearableFramePayload({
+        expectedDeviceId: 'ESP32-S3-SENTRA-001',
+        responseDeviceIdHeader: 'ESP32-S3-SENTRA-001',
+        mimeType: 'application/json',
+        byteSize: 64,
+        frameAgeMs: 250,
+        staleFlag: false,
+      }).ok
+    ).toBe(false);
+
+    expect(
+      validateWearableFramePayload({
+        expectedDeviceId: 'ESP32-S3-SENTRA-001',
+        responseDeviceIdHeader: 'ESP32-S3-SENTRA-001',
+        mimeType: 'image/jpeg',
+        byteSize: 4096,
+        frameAgeMs: 250,
+        staleFlag: false,
+      }).ok
+    ).toBe(true);
+  });
+});
+
 describe('SENTRA UI Terminology & PWA Assets Verification', () => {
-  it('removes all user-facing "Cloud Vision" references in src', () => {
-    const srcDir = path.resolve(process.cwd(), 'src');
+  it('removes all legacy "Cloud Vision" or "SCENE 2026" references in src and server', () => {
     const walk = (dir: string): string[] => {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
       const files: string[] = [];
@@ -140,9 +270,14 @@ describe('SENTRA UI Terminology & PWA Assets Verification', () => {
       return files;
     };
 
-    const hits = walk(srcDir).filter((file) =>
-      fs.readFileSync(file, 'utf8').includes('Cloud Vision')
-    );
+    const allFiles = [
+      ...walk(path.resolve(process.cwd(), 'src')),
+      ...walk(path.resolve(process.cwd(), 'server')),
+    ];
+    const hits = allFiles.filter((file) => {
+      const content = fs.readFileSync(file, 'utf8');
+      return /cloud vision|scene 2026/i.test(content);
+    });
     expect(hits).toEqual([]);
   });
 
@@ -161,3 +296,4 @@ describe('SENTRA UI Terminology & PWA Assets Verification', () => {
     }
   });
 });
+

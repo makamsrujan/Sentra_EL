@@ -15,18 +15,23 @@ import {
   VolumeX,
   Mic,
   Smartphone,
+  Sparkles,
+  Square,
 } from 'lucide-react';
-import { SentraSettings, SystemHealthStatus } from '../types/sentra';
+import { GeminiDiagnosticResult, SentraSettings, SystemHealthStatus } from '../types/sentra';
 import { DeviceLiveState } from '../types/deviceProtocol';
 import { speakText } from '../utils/audio';
 import {
   clearStoredTelemetryEvents,
   fetchHealthStatus,
   registerHardwareDevice,
+  runGeminiDiagnostic,
 } from '../services/deviceApi';
 import type { BrowserCameraErrorType, BrowserCameraStatus } from '../hooks/useCamera';
 import type { VoiceAssistantState, VoiceCompatibilityInfo } from '../hooks/useVoiceAssistant';
 import { PWAInstallButton } from './PWAInstallButton';
+
+const OPERATOR_TOKEN_SESSION_KEY = 'sentra.operator.token';
 
 interface CameraDiagnosticsSnapshot {
   source: string;
@@ -49,6 +54,11 @@ interface SettingsDiagnosticsViewProps {
   voiceState: VoiceAssistantState;
   voiceError: string | null;
   voiceCompatibility: VoiceCompatibilityInfo;
+  micTestActive: boolean;
+  micTestTranscript: string;
+  micTestError: string | null;
+  onStartMicTest: () => void | Promise<unknown>;
+  onStopMicTest: () => void;
   onToggleWakeWord: (enabled: boolean) => void | Promise<unknown>;
   onRestartMicrophone: () => void | Promise<unknown>;
   onDeviceRegistered?: (deviceId: string) => void;
@@ -63,6 +73,11 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   voiceState,
   voiceError,
   voiceCompatibility,
+  micTestActive,
+  micTestTranscript,
+  micTestError,
+  onStartMicTest,
+  onStopMicTest,
   onToggleWakeWord,
   onRestartMicrophone,
   onDeviceRegistered,
@@ -70,6 +85,18 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   const [health, setHealth] = useState<SystemHealthStatus | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [checkingHealth, setCheckingHealth] = useState(false);
+
+  const [geminiDiag, setGeminiDiag] = useState<GeminiDiagnosticResult | null>(null);
+  const [checkingGemini, setCheckingGemini] = useState(false);
+  const [geminiDiagError, setGeminiDiagError] = useState<string | null>(null);
+
+  const [operatorToken, setOperatorToken] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem(OPERATOR_TOKEN_SESSION_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
 
   // Hardware Device Registration Form
   const [regDeviceId, setRegDeviceId] = useState('ESP32-S3-SENTRA-001');
@@ -87,6 +114,14 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
   } | null>(null);
   const [regError, setRegError] = useState<string | null>(null);
   const [confirmClearEvents, setConfirmClearEvents] = useState(false);
+  const [clearEventsError, setClearEventsError] = useState<string | null>(null);
+
+  const handleOperatorTokenChange = (val: string) => {
+    setOperatorToken(val);
+    try {
+      sessionStorage.setItem(OPERATOR_TOKEN_SESSION_KEY, val);
+    } catch {}
+  };
 
   const runDiagnosticsRefresh = useCallback(async () => {
     setCheckingHealth(true);
@@ -101,6 +136,20 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
       setCheckingHealth(false);
     }
   }, []);
+
+  const handleRunGeminiDiagnostic = useCallback(async () => {
+    setCheckingGemini(true);
+    setGeminiDiagError(null);
+    try {
+      const result = await runGeminiDiagnostic();
+      setGeminiDiag(result);
+      await runDiagnosticsRefresh();
+    } catch (err: any) {
+      setGeminiDiagError(err?.message || 'Gemini diagnostic request failed');
+    } finally {
+      setCheckingGemini(false);
+    }
+  }, [runDiagnosticsRefresh]);
 
   useEffect(() => {
     runDiagnosticsRefresh();
@@ -121,6 +170,7 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
         deviceId: regDeviceId.trim(),
         name: regName.trim(),
         capabilities: regCaps,
+        operatorToken: operatorToken.trim() || undefined,
       });
       setProvisionedResult({ deviceId: res.deviceId, token: res.provisionedToken });
       onDeviceRegistered?.(res.deviceId);
@@ -128,6 +178,35 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
       setRegError(err?.message || 'Device registration failed');
     }
   };
+
+  const geminiVerifiedHealthy = Boolean(geminiDiag?.ok && geminiDiag?.apiReachable);
+  const geminiDetail = (() => {
+    if (geminiDiag) {
+      if (geminiDiag.ok) {
+        return `Verified Connected · Configured: ${geminiDiag.configuredModel} · Working Model: ${geminiDiag.modelUsed}${
+          geminiDiag.usedFallback ? ' (Fallback used)' : ''
+        } (${geminiDiag.latencyMs ?? '?'} ms)`;
+      }
+      return `Failed (${geminiDiag.errorCode || 'ERROR'}): ${geminiDiag.errorMessage || 'Check failed'}`;
+    }
+    if (!health) return 'Checking configuration…';
+    if (!health.modelConfigValid) {
+      return `Invalid SENTRA_GEMINI_MODEL: ${health.modelConfigError}`;
+    }
+    if (!health.hasApiKey) {
+      return 'Missing GEMINI_API_KEY on server';
+    }
+    return `Key present (unverified until live test) · Configured: ${health.configuredModel}${
+      health.lastWorkingModel ? ` · Last Working: ${health.lastWorkingModel}` : ''
+    }`;
+  })();
+
+  const voiceHealthy =
+    speechRecSupported &&
+    speechSynthSupported &&
+    voiceState !== 'error' &&
+    voiceState !== 'permission_blocked' &&
+    voiceState !== 'unsupported';
 
   const diagnosticRows = [
     {
@@ -143,11 +222,9 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
         : health?.databaseError || 'Database unavailable',
     },
     {
-      label: 'Gemini API Configured',
-      healthy: Boolean(health?.hasApiKey),
-      detail: health?.hasApiKey
-        ? `Key present · Model: ${health.configuredModel}`
-        : 'Missing GEMINI_API_KEY on server',
+      label: 'Gemini API & Model Access',
+      healthy: geminiVerifiedHealthy,
+      detail: geminiDiagError ? geminiDiagError : geminiDetail,
     },
     {
       label: 'Browser Camera & Environment',
@@ -193,7 +270,7 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
     },
     {
       label: 'Voice Wake Word & Speech Engine',
-      healthy: speechRecSupported && speechSynthSupported && voiceState !== 'error',
+      healthy: voiceHealthy,
       detail: voiceError
         ? `Voice Error: ${voiceError}`
         : `State: ${voiceState} · ${voiceCompatibility.modeSummary}`,
@@ -204,21 +281,39 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
     <div className="space-y-4 text-foreground">
       {/* Live System Diagnostics */}
       <div className="rounded-xl bg-card border border-border p-4 space-y-3">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-bold text-lg text-accent">
             <ShieldCheck className="h-5 w-5" />
-            <span>Live System Diagnostics</span>
+            <span>Settings & Diagnostics</span>
           </div>
-          <button
-            type="button"
-            onClick={runDiagnosticsRefresh}
-            disabled={checkingHealth}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold hover:border-primary"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${checkingHealth ? 'animate-spin' : ''}`} />
-            <span>Re-check Health</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRunGeminiDiagnostic}
+              disabled={checkingGemini}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-bold text-primary-foreground hover:brightness-110 disabled:opacity-60"
+            >
+              <Sparkles className={`h-3.5 w-3.5 ${checkingGemini ? 'animate-spin' : ''}`} />
+              <span>{checkingGemini ? 'Testing Gemini…' : 'Verify Gemini API'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={runDiagnosticsRefresh}
+              disabled={checkingHealth}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold hover:border-primary"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${checkingHealth ? 'animate-spin' : ''}`} />
+              <span>Re-check Health</span>
+            </button>
+          </div>
         </div>
+
+        {health?.supportedModels && (
+          <p className="text-[11px] font-mono text-muted-foreground">
+            Configured Model: <span className="text-foreground">{health.configuredModel}</span> · Supported:{' '}
+            {health.supportedModels.join(', ')}
+          </p>
+        )}
 
         {lastAppError && (
           <div className="rounded-lg bg-destructive/15 border border-destructive/40 p-3 flex items-start gap-2 text-xs">
@@ -233,9 +328,9 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
         <div className="divide-y divide-border/50 rounded-xl border border-border/60 bg-secondary/40">
           {diagnosticRows.map((row) => (
             <div key={row.label} className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs">
-              <div>
+              <div className="min-w-0">
                 <p className="font-bold text-foreground">{row.label}</p>
-                <p className="text-muted-foreground font-mono">{row.detail}</p>
+                <p className="text-muted-foreground font-mono break-words">{row.detail}</p>
               </div>
               <span
                 className={`inline-flex items-center gap-1 font-mono font-bold shrink-0 ${
@@ -361,7 +456,7 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
                 <div>
                   <p className="font-semibold">Foreground "Hey SENTRA" Wake Listening</p>
                   <p className="text-xs text-muted-foreground">
-                    {voiceCompatibility.modeSummary}
+                    State: <span className="font-mono text-foreground">{voiceState}</span> · {voiceCompatibility.modeSummary}
                   </p>
                 </div>
               </div>
@@ -392,6 +487,49 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
                   Restart Mic
                 </button>
               </div>
+            )}
+          </div>
+
+          {/* Live Microphone Recognition Test (displays recognized words without running assistant commands) */}
+          <div className="rounded-xl bg-secondary/60 border border-border/70 p-3 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="font-semibold text-sm">Microphone Recognition Test</p>
+                <p className="text-xs text-muted-foreground">
+                  Speak clearly to verify live speech-to-text recognition without sending commands.
+                </p>
+              </div>
+              {micTestActive ? (
+                <button
+                  type="button"
+                  onClick={onStopMicTest}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-destructive px-3 py-1.5 text-xs font-bold text-destructive-foreground"
+                >
+                  <Square className="h-3.5 w-3.5" />
+                  <span>Stop Mic Test</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onStartMicTest}
+                  disabled={!voiceCompatibility.speechRecognitionSupported}
+                  className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-card border border-border px-3 py-1.5 text-xs font-bold hover:border-primary disabled:opacity-40"
+                >
+                  <Mic className="h-3.5 w-3.5 text-primary" />
+                  <span>Test Microphone</span>
+                </button>
+              )}
+            </div>
+            {(micTestActive || micTestTranscript) && (
+              <div className="rounded-lg bg-card border border-border px-3 py-2 text-xs font-mono">
+                <span className="text-muted-foreground">Recognized: </span>
+                <span className="text-primary">
+                  {micTestTranscript ? `"${micTestTranscript}"` : 'Listening for speech…'}
+                </span>
+              </div>
+            )}
+            {micTestError && (
+              <p className="text-xs font-mono text-destructive">{micTestError}</p>
             )}
           </div>
 
@@ -452,13 +590,19 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
           <span>ESP32-S3 Device Registration & Provisioning</span>
         </div>
         <p className="text-xs text-muted-foreground leading-relaxed">
-          Register an ESP32-S3 unit to obtain a single-display authentication token for{' '}
+          Requires operator authorization (<span className="font-mono">SENTRA_OPERATOR_TOKEN</span> configured on server) to register an ESP32-S3 unit and generate a one-time device token for{' '}
           <span className="font-mono">POST /api/device/telemetry</span> and{' '}
-          <span className="font-mono">POST /api/device/frame</span>. Hardware write endpoints require HTTPS in non-local deployments.
+          <span className="font-mono">POST /api/device/frame</span>.
         </p>
 
+        {health && !health.operatorAuthConfigured && (
+          <div className="rounded-lg bg-amber-500/10 border border-amber-500/40 px-3 py-2 text-xs text-amber-300">
+            Server notice: <span className="font-mono">SENTRA_OPERATOR_TOKEN</span> is not set in server environment. Registration and telemetry deletion remain locked until set on the server.
+          </div>
+        )}
+
         <form onSubmit={handleRegisterSubmit} className="space-y-3">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             <input
               type="text"
               value={regDeviceId}
@@ -473,6 +617,14 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
               onChange={(e) => setRegName(e.target.value)}
               placeholder="Friendly Name"
               className="rounded-lg bg-secondary border border-border px-3 py-2 text-xs text-foreground"
+              required
+            />
+            <input
+              type="password"
+              value={operatorToken}
+              onChange={(e) => handleOperatorTokenChange(e.target.value)}
+              placeholder="Operator Token (SENTRA_OPERATOR_TOKEN)"
+              className="rounded-lg bg-secondary border border-border px-3 py-2 text-xs font-mono text-foreground"
               required
             />
           </div>
@@ -526,48 +678,63 @@ export const SettingsDiagnosticsView: React.FC<SettingsDiagnosticsViewProps> = (
       </div>
 
       {/* Stored Event Management */}
-      <div className="rounded-xl bg-card border border-border p-4 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="font-bold text-sm text-foreground">Stored Telemetry & Audit Records</p>
-          <p className="text-xs text-muted-foreground">
-            Export persisted SQLite records or clear telemetry history.
-          </p>
-        </div>
+      <div className="rounded-xl bg-card border border-border p-4 space-y-2">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <p className="font-bold text-sm text-foreground">Stored Telemetry & Audit Records</p>
+            <p className="text-xs text-muted-foreground">
+              Export persisted SQLite records or clear telemetry history (requires Operator Token above).
+            </p>
+          </div>
 
-        <div className="flex items-center gap-2">
-          <a
-            href="/api/events/export"
-            download="sentra-events-export.json"
-            className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold"
-          >
-            <Download className="h-3.5 w-3.5" />
-            <span>Export JSON</span>
-          </a>
+          <div className="flex items-center gap-2">
+            <a
+              href="/api/events/export"
+              download="sentra-events-export.json"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-secondary border border-border px-3 py-1.5 text-xs font-bold"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Export JSON</span>
+            </a>
 
-          {!confirmClearEvents ? (
-            <button
-              type="button"
-              onClick={() => setConfirmClearEvents(true)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-destructive/15 border border-destructive/40 px-3 py-1.5 text-xs font-bold text-destructive"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>Clear Events</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={async () => {
-                await clearStoredTelemetryEvents();
-                setConfirmClearEvents(false);
-                runDiagnosticsRefresh();
-              }}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-destructive px-3 py-1.5 text-xs font-bold text-destructive-foreground"
-            >
-              Confirm Delete Telemetry
-            </button>
-          )}
+            {!confirmClearEvents ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setClearEventsError(null);
+                  setConfirmClearEvents(true);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-destructive/15 border border-destructive/40 px-3 py-1.5 text-xs font-bold text-destructive"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                <span>Clear Events</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={async () => {
+                  setClearEventsError(null);
+                  try {
+                    await clearStoredTelemetryEvents(operatorToken.trim() || undefined);
+                    setConfirmClearEvents(false);
+                    runDiagnosticsRefresh();
+                  } catch (err: any) {
+                    setClearEventsError(err?.message || 'Failed to clear events');
+                    setConfirmClearEvents(false);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-destructive px-3 py-1.5 text-xs font-bold text-destructive-foreground"
+              >
+                Confirm Delete Telemetry
+              </button>
+            )}
+          </div>
         </div>
+        {clearEventsError && (
+          <p className="text-xs font-mono text-destructive">{clearEventsError}</p>
+        )}
       </div>
     </div>
   );
 };
+

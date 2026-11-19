@@ -3,6 +3,7 @@ import type { DeviceLiveState, PathSafetyStatus } from '../src/types/deviceProto
 import type {
   AnalysisErrorCode,
   AnalysisResponseData,
+  GeminiDiagnosticResult,
   HazardAlert,
   SentraMode,
   SentraOperation,
@@ -10,23 +11,65 @@ import type {
 import { SentraEventStore } from './eventStore';
 import { decodeBase64Image, sanitizeGeminiResponse } from './validation';
 
-const ALLOWED_MODELS = [
+export const SUPPORTED_MODELS = [
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite-preview',
+  'gemini-3.6-flash',
+  'gemini-3.8-flash',
   'gemini-4-hydrogen',
   'gemini-3.1-flash-lite',
   'gemini-4-argon',
   'gemini-4-carbon',
-];
+  'gemini-4-neon',
+] as const;
 
-const DEFAULT_PRIMARY_MODEL = 'gemini-4-hydrogen';
-const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+export const DEFAULT_PRIMARY_MODEL = 'gemini-4-hydrogen';
+export const FALLBACK_MODEL = 'gemini-2.5-flash';
 const GEMINI_TIMEOUT_MS = 9500;
 
-export function getConfiguredModel(): string {
-  const configured = process.env.SENTRA_GEMINI_MODEL?.trim();
-  if (configured && ALLOWED_MODELS.includes(configured)) {
-    return configured;
+let lastWorkingModelState: string | null = null;
+
+export interface ModelConfigValidation {
+  valid: boolean;
+  rawConfiguredModel: string | null;
+  configuredModel: string;
+  errorMessage: string | null;
+}
+
+export function validateConfiguredModel(): ModelConfigValidation {
+  const raw = process.env.SENTRA_GEMINI_MODEL?.trim() || null;
+  if (!raw) {
+    return {
+      valid: true,
+      rawConfiguredModel: null,
+      configuredModel: DEFAULT_PRIMARY_MODEL,
+      errorMessage: null,
+    };
   }
-  return DEFAULT_PRIMARY_MODEL;
+  if ((SUPPORTED_MODELS as readonly string[]).includes(raw)) {
+    return {
+      valid: true,
+      rawConfiguredModel: raw,
+      configuredModel: raw,
+      errorMessage: null,
+    };
+  }
+  return {
+    valid: false,
+    rawConfiguredModel: raw,
+    configuredModel: raw,
+    errorMessage: `Configured SENTRA_GEMINI_MODEL "${raw}" is not supported. Supported models: ${SUPPORTED_MODELS.join(', ')}.`,
+  };
+}
+
+export function getConfiguredModel(): string {
+  return validateConfiguredModel().configuredModel;
+}
+
+export function getLastWorkingModel(): string | null {
+  return lastWorkingModelState;
 }
 
 export function isGeminiApiKeyConfigured(): boolean {
@@ -227,15 +270,19 @@ function buildTruthfulDegradedResponse(params: {
     }
   } else if (errorCode === 'MISSING_API_KEY') {
     spoken = hasFreshImage
-      ? 'The camera is active, but cloud object recognition is unavailable because Gemini API credentials are not configured on the server.'
-      : 'No current visual analysis is available because Gemini API credentials are not configured on the server.';
+      ? 'The camera is active, but AI Visual Analysis is unavailable because Gemini API credentials are not configured on the server.'
+      : 'No current AI Visual Analysis is available because Gemini API credentials are not configured on the server.';
+  } else if (errorCode === 'UNSUPPORTED_MODEL') {
+    spoken = `Configured Gemini model is invalid or unavailable: ${errorMessage}`;
   } else if (errorCode === 'QUOTA_EXHAUSTED') {
     spoken = hasFreshImage
-      ? 'The camera is active, but cloud vision quota has been reached. No visual confirmation can be provided right now.'
-      : 'Cloud vision quota has been reached. No current analysis is available.';
+      ? 'The camera is active, but Gemini AI quota has been reached. No visual confirmation can be provided right now.'
+      : 'Gemini AI quota has been reached. No current analysis is available.';
+  } else if (errorCode === 'PERMISSION_DENIED') {
+    spoken = 'Gemini API authentication failed on the server. Verify GEMINI_API_KEY and model access.';
   } else {
     spoken = hasFreshImage
-      ? 'The camera is active, but object recognition is currently unavailable due to a service error.'
+      ? 'The camera is active, but AI Visual Analysis is currently unavailable due to a service error.'
       : 'No current visual analysis is available right now.';
   }
 
@@ -260,6 +307,7 @@ function buildTruthfulDegradedResponse(params: {
     suggestedAction: null,
     reachGuidance: null,
     modelUsed: null,
+    fallbackUsed: false,
     frameTimestamp,
     timestamp: Date.now(),
   };
@@ -268,19 +316,155 @@ function buildTruthfulDegradedResponse(params: {
 function classifyGeminiError(err: any): { code: AnalysisErrorCode; message: string; retryable: boolean } {
   const status = err?.status || err?.code;
   const msg = String(err?.message || 'Gemini request failed');
+  const lower = msg.toLowerCase();
   if (msg === 'TIMEOUT') {
     return { code: 'TIMEOUT', message: 'Gemini analysis timed out.', retryable: true };
   }
-  if (status === 429 || msg.includes('RESOURCE_EXHAUSTED') || msg.toLowerCase().includes('quota')) {
+  if (status === 429 || msg.includes('RESOURCE_EXHAUSTED') || lower.includes('quota')) {
     return { code: 'QUOTA_EXHAUSTED', message: 'Gemini API quota exhausted (429).', retryable: false };
   }
-  if (status === 403 || status === 401 || msg.includes('PERMISSION_DENIED') || msg.includes('API key')) {
+  if (status === 403 || status === 401 || msg.includes('PERMISSION_DENIED') || lower.includes('api key')) {
     return { code: 'PERMISSION_DENIED', message: 'Gemini API authentication failed (403/401).', retryable: false };
   }
-  if (status >= 500 || msg.includes('fetch') || msg.includes('network') || msg.includes('ECONN')) {
+  if (
+    status === 404 ||
+    lower.includes('not found') ||
+    lower.includes('not supported') ||
+    lower.includes('unknown model')
+  ) {
+    return { code: 'UNSUPPORTED_MODEL', message: `Model unavailable or unsupported: ${msg}`, retryable: false };
+  }
+  if (status >= 500 || lower.includes('fetch') || lower.includes('network') || msg.includes('ECONN')) {
     return { code: 'UPSTREAM_ERROR', message: msg, retryable: true };
   }
   return { code: 'UPSTREAM_ERROR', message: msg, retryable: false };
+}
+
+export async function runGeminiDiagnostic(): Promise<GeminiDiagnosticResult> {
+  const checkedAt = Date.now();
+  const validation = validateConfiguredModel();
+  const hasApiKey = isGeminiApiKeyConfigured();
+
+  if (!validation.valid) {
+    return {
+      ok: false,
+      hasApiKey,
+      configuredModel: validation.configuredModel,
+      rawConfiguredModel: validation.rawConfiguredModel,
+      modelConfigValid: false,
+      modelConfigError: validation.errorMessage,
+      modelUsed: null,
+      usedFallback: false,
+      apiReachable: false,
+      latencyMs: null,
+      errorCode: 'UNSUPPORTED_MODEL',
+      errorMessage: validation.errorMessage,
+      checkedAt,
+    };
+  }
+
+  const ai = getGeminiClient();
+  if (!ai) {
+    return {
+      ok: false,
+      hasApiKey: false,
+      configuredModel: validation.configuredModel,
+      rawConfiguredModel: validation.rawConfiguredModel,
+      modelConfigValid: true,
+      modelConfigError: null,
+      modelUsed: null,
+      usedFallback: false,
+      apiReachable: false,
+      latencyMs: null,
+      errorCode: 'MISSING_API_KEY',
+      errorMessage: 'GEMINI_API_KEY is not configured on the server.',
+      checkedAt,
+    };
+  }
+
+  const primary = validation.configuredModel;
+  const modelsToProbe = primary === FALLBACK_MODEL ? [primary] : [primary, FALLBACK_MODEL];
+  let primaryFailure: { code: AnalysisErrorCode; message: string } | null = null;
+  const startedAt = Date.now();
+
+  for (let i = 0; i < modelsToProbe.length; i++) {
+    const candidate = modelsToProbe[i];
+    try {
+      const response = await Promise.race([
+        ai.models.generateContent({
+          model: candidate,
+          contents: 'Reply with OK.',
+          config: { maxOutputTokens: 8 },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('TIMEOUT')), GEMINI_TIMEOUT_MS)
+        ),
+      ]);
+      const reply = response.text?.trim() || '';
+      if (!reply) {
+        throw new Error('Model returned an empty diagnostic response.');
+      }
+      lastWorkingModelState = candidate;
+      const usedFallback = i > 0;
+      return {
+        ok: true,
+        hasApiKey: true,
+        configuredModel: primary,
+        rawConfiguredModel: validation.rawConfiguredModel,
+        modelConfigValid: true,
+        modelConfigError: null,
+        modelUsed: candidate,
+        usedFallback,
+        apiReachable: true,
+        latencyMs: Date.now() - startedAt,
+        errorCode: usedFallback ? primaryFailure?.code ?? null : null,
+        errorMessage: usedFallback
+          ? `Configured model "${primary}" failed (${primaryFailure?.message || 'unavailable'}). Verified fallback model "${candidate}" succeeded.`
+          : null,
+        checkedAt: Date.now(),
+      };
+    } catch (err: any) {
+      const classified = classifyGeminiError(err);
+      if (i === 0) {
+        primaryFailure = { code: classified.code, message: classified.message };
+        if (classified.code === 'PERMISSION_DENIED') {
+          break;
+        }
+      } else {
+        return {
+          ok: false,
+          hasApiKey: true,
+          configuredModel: primary,
+          rawConfiguredModel: validation.rawConfiguredModel,
+          modelConfigValid: true,
+          modelConfigError: null,
+          modelUsed: null,
+          usedFallback: false,
+          apiReachable: false,
+          latencyMs: Date.now() - startedAt,
+          errorCode: primaryFailure?.code || classified.code,
+          errorMessage: `Primary "${primary}": ${primaryFailure?.message || 'failed'}; Fallback "${candidate}": ${classified.message}`,
+          checkedAt: Date.now(),
+        };
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    hasApiKey: true,
+    configuredModel: primary,
+    rawConfiguredModel: validation.rawConfiguredModel,
+    modelConfigValid: true,
+    modelConfigError: null,
+    modelUsed: null,
+    usedFallback: false,
+    apiReachable: false,
+    latencyMs: Date.now() - startedAt,
+    errorCode: primaryFailure?.code || 'UPSTREAM_ERROR',
+    errorMessage: primaryFailure?.message || 'Gemini diagnostic check failed.',
+    checkedAt: Date.now(),
+  };
 }
 
 export async function runSentraAnalysis(params: {
@@ -390,6 +574,31 @@ export async function runSentraAnalysis(params: {
     return degraded;
   }
 
+  const modelValidation = validateConfiguredModel();
+  if (!modelValidation.valid) {
+    const degraded = buildTruthfulDegradedResponse({
+      operation,
+      errorCode: 'UNSUPPORTED_MODEL',
+      errorMessage: modelValidation.errorMessage!,
+      goal: params.goal,
+      memory: params.memory,
+      hardwareHazard,
+      hasFreshImage,
+      frameTimestamp,
+    });
+    params.store.insertAnalysisEvent({
+      operation,
+      mode: params.mode,
+      status: 'error',
+      model: modelValidation.configuredModel,
+      latencyMs: Date.now() - startTime,
+      errorCode: 'UNSUPPORTED_MODEL',
+      summary: modelValidation.errorMessage!,
+      frameTimestamp,
+    });
+    return degraded;
+  }
+
   const ai = getGeminiClient();
   if (!ai) {
     const degraded = buildTruthfulDegradedResponse({
@@ -456,7 +665,7 @@ export async function runSentraAnalysis(params: {
   }
   parts.push({ text: lines.join('\n') });
 
-  const primaryModel = getConfiguredModel();
+  const primaryModel = modelValidation.configuredModel;
   const modelsToTry = primaryModel === FALLBACK_MODEL ? [primaryModel] : [primaryModel, FALLBACK_MODEL];
 
   let lastError: { code: AnalysisErrorCode; message: string } = {
@@ -464,7 +673,8 @@ export async function runSentraAnalysis(params: {
     message: 'Gemini request did not succeed.',
   };
 
-  for (const model of modelsToTry) {
+  for (let modelIdx = 0; modelIdx < modelsToTry.length; modelIdx++) {
+    const model = modelsToTry[modelIdx];
     // Up to 2 attempts per model (1 retry only on retryable errors)
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -515,6 +725,7 @@ export async function runSentraAnalysis(params: {
           frameTimestamp,
         });
 
+        lastWorkingModelState = model;
         return {
           ok: true,
           status: 'ok',
@@ -522,6 +733,7 @@ export async function runSentraAnalysis(params: {
           text: sanitized.spokenResponse,
           ...sanitized,
           modelUsed: model,
+          fallbackUsed: modelIdx > 0,
           frameTimestamp,
           timestamp: Date.now(),
         };

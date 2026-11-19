@@ -173,6 +173,7 @@ export interface ReachGuidance {
 
 export type AnalysisErrorCode =
   | 'MISSING_API_KEY'
+  | 'UNSUPPORTED_MODEL'
   | 'QUOTA_EXHAUSTED'
   | 'PERMISSION_DENIED'
   | 'UPSTREAM_ERROR'
@@ -204,8 +205,25 @@ export interface AnalysisResponseData {
     nextAction?: string;
   } | null;
   modelUsed?: string | null;
+  fallbackUsed?: boolean;
   frameTimestamp?: number | null;
   timestamp: number;
+}
+
+export interface GeminiDiagnosticResult {
+  ok: boolean;
+  hasApiKey: boolean;
+  configuredModel: string;
+  rawConfiguredModel: string | null;
+  modelConfigValid: boolean;
+  modelConfigError: string | null;
+  modelUsed: string | null;
+  usedFallback: boolean;
+  apiReachable: boolean;
+  latencyMs: number | null;
+  errorCode: AnalysisErrorCode | null;
+  errorMessage: string | null;
+  checkedAt: number;
 }
 
 export interface SystemHealthStatus {
@@ -215,6 +233,12 @@ export interface SystemHealthStatus {
   databaseError?: string | null;
   hasApiKey: boolean;
   configuredModel: string;
+  rawConfiguredModel: string | null;
+  modelConfigValid: boolean;
+  modelConfigError: string | null;
+  supportedModels: string[];
+  lastWorkingModel: string | null;
+  operatorAuthConfigured: boolean;
   simulatorEnabled: boolean;
   deviceAuthRequired: boolean;
   heartbeatTimeoutMs: number;

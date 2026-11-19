@@ -993,9 +993,13 @@ export default function App() {
     VoiceAssistantState,
     { label: string; classes: string; pulse?: boolean }
   > = {
-    standby: {
-      label: 'Voice Standby',
+    disabled: {
+      label: 'Voice Disabled',
       classes: 'bg-secondary text-muted-foreground border-border',
+    },
+    starting: {
+      label: 'Starting Mic…',
+      classes: 'bg-secondary text-primary border-primary/40',
     },
     wake_listening: {
       label: 'Listening for "Hey SENTRA"',
@@ -1015,8 +1019,16 @@ export default function App() {
       label: 'Speaking',
       classes: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50',
     },
+    permission_blocked: {
+      label: 'Mic Permission Blocked',
+      classes: 'bg-destructive/15 text-destructive border-destructive/50',
+    },
+    unsupported: {
+      label: 'Voice Unsupported',
+      classes: 'bg-secondary text-muted-foreground border-border',
+    },
     error: {
-      label: 'Microphone Issue',
+      label: 'Microphone Error',
       classes: 'bg-destructive/15 text-destructive border-destructive/50',
     },
   };
@@ -1032,7 +1044,7 @@ export default function App() {
     { id: 'vision', label: `Live Vision (${detectedObjects.length})`, mobileLabel: 'Vision', Icon: Eye },
     { id: 'finder', label: 'Object Finder', mobileLabel: 'Finder', Icon: Crosshair },
     { id: 'spatial', label: 'Spatial Awareness', mobileLabel: 'Spatial', Icon: Compass },
-    { id: 'memory', label: `Memory (${memories.length})`, mobileLabel: 'Memory', Icon: Bookmark },
+    { id: 'memory', label: `Contextual Memory (${memories.length})`, mobileLabel: 'Memory', Icon: Bookmark },
   ];
 
   const companionNavItems: Array<{
@@ -1041,7 +1053,7 @@ export default function App() {
     mobileLabel: string;
     Icon: React.ComponentType<{ className?: string }>;
   }> = [
-    { id: 'device', label: 'Wearable Status & Analytics', mobileLabel: 'Wearable', Icon: Cpu },
+    { id: 'device', label: 'Device & Analytics', mobileLabel: 'Device', Icon: Cpu },
     { id: 'settings', label: 'Settings & Diagnostics', mobileLabel: 'Settings', Icon: Sliders },
   ];
 
@@ -1240,7 +1252,8 @@ export default function App() {
                         className={`h-2 w-2 rounded-full ${
                           currentVoiceMeta.pulse
                             ? 'bg-current animate-ping'
-                            : voice.assistantState === 'error'
+                            : voice.assistantState === 'error' ||
+                              voice.assistantState === 'permission_blocked'
                             ? 'bg-destructive'
                             : 'bg-current opacity-60'
                         }`}
@@ -1700,6 +1713,11 @@ export default function App() {
               voiceState={voice.assistantState}
               voiceError={voice.voiceError}
               voiceCompatibility={voice.compatibility}
+              micTestActive={voice.micTestActive}
+              micTestTranscript={voice.micTestTranscript}
+              micTestError={voice.micTestError}
+              onStartMicTest={voice.startMicTest}
+              onStopMicTest={voice.stopMicTest}
               onToggleWakeWord={handleToggleWakeWord}
               onRestartMicrophone={voice.restartMicrophone}
               onDeviceRegistered={(deviceId) => {

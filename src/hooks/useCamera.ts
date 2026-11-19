@@ -25,12 +25,14 @@ interface UseCameraOptions {
   facingMode: 'environment' | 'user';
   selectedDeviceId: string | null;
   autoStart?: boolean;
+  onClearSelectedDeviceId?: () => void;
 }
 
 export function useCamera({
   facingMode,
   selectedDeviceId,
   autoStart = false,
+  onClearSelectedDeviceId,
 }: UseCameraOptions) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -84,12 +86,20 @@ export function useCamera({
     async (overrideDeviceId?: string | null, overrideFacing?: 'environment' | 'user'): Promise<boolean> => {
       const requestToken = ++sessionTokenRef.current;
 
-      // Release any previous active stream first so two streams never compete
+      // Release any previous active stream first so mobile drivers unlock the lens before switching
+      const hadActiveStream = Boolean(streamRef.current);
       if (streamRef.current) {
         stopMediaStream(streamRef.current);
         streamRef.current = null;
       }
       clearVideoElement();
+
+      if (hadActiveStream) {
+        await new Promise((r) => setTimeout(r, 80));
+        if (!mountedRef.current || requestToken !== sessionTokenRef.current) {
+          return false;
+        }
+      }
 
       const env = await inspectCameraEnvironment();
       if (!mountedRef.current || requestToken !== sessionTokenRef.current) {
@@ -118,7 +128,7 @@ export function useCamera({
         setStatus('error');
         setErrorType('blocked_by_embed');
         setErrorMessage(
-          'Camera access is blocked by the embedded preview Permissions Policy. Open SENTRA directly in a top-level HTTPS browser tab.'
+          'Camera access is blocked by this embedded preview frame (Permissions Policy). Open SENTRA directly in a top-level HTTPS browser tab.'
         );
         return false;
       }
@@ -138,9 +148,14 @@ export function useCamera({
       const rawTargetId = overrideDeviceId !== undefined ? overrideDeviceId : selectedDeviceId;
       // Only use deviceId if it matches an actually enumerated device; avoid stale/rotated IDs
       const validTargetId =
-        rawTargetId && availableDevices.some((d) => d.deviceId === rawTargetId)
+        rawTargetId &&
+        (availableDevices.length === 0 || availableDevices.some((d) => d.deviceId === rawTargetId))
           ? rawTargetId
           : null;
+      if (rawTargetId && !validTargetId) {
+        setActiveDeviceId(null);
+        onClearSelectedDeviceId?.();
+      }
       const targetFacing = overrideFacing ?? facingMode;
 
       const candidateConstraints: MediaStreamConstraints[] = [];
@@ -185,12 +200,18 @@ export function useCamera({
       }
 
       if (!stream) {
-        // Re-check permissions state after failure to accurately distinguish embed policy vs user denial
+        // Re-check permissions state after failure to accurately distinguish OS/site/embed issues
         const postEnv = await inspectCameraEnvironment();
         if (!mountedRef.current || requestToken !== sessionTokenRef.current) {
           return false;
         }
-        const classified = classifyCameraError(lastErr, postEnv);
+        const classified = classifyCameraError(lastErr, postEnv, {
+          hadExplicitDeviceId: Boolean(validTargetId || rawTargetId),
+        });
+        if (classified.type === 'invalid_device_id') {
+          setActiveDeviceId(null);
+          onClearSelectedDeviceId?.();
+        }
         setStatus('error');
         setErrorType(classified.type);
         setErrorMessage(classified.message);
@@ -339,7 +360,7 @@ export function useCamera({
       await refreshDevices();
       return true;
     },
-    [facingMode, selectedDeviceId, refreshDevices, clearVideoElement]
+    [facingMode, selectedDeviceId, refreshDevices, clearVideoElement, onClearSelectedDeviceId]
   );
 
   const toggleTorch = useCallback(async () => {

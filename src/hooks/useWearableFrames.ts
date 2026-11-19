@@ -2,6 +2,47 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchFrameStatus, fetchLatestFrameBlob } from '../services/deviceApi';
 import type { DeviceSourceMode } from '../types/deviceProtocol';
 
+export function validateWearableFramePayload(params: {
+  expectedDeviceId: string;
+  responseDeviceIdHeader: string | null;
+  mimeType: string;
+  byteSize: number;
+  frameAgeMs: number | null;
+  staleFlag: boolean;
+}): { ok: boolean; reason?: string } {
+  if (
+    params.responseDeviceIdHeader &&
+    params.responseDeviceIdHeader.trim() !== params.expectedDeviceId.trim()
+  ) {
+    return {
+      ok: false,
+      reason: `Mismatched frame device ID (${params.responseDeviceIdHeader} != ${params.expectedDeviceId})`,
+    };
+  }
+  if (params.byteSize <= 0 || !params.mimeType.toLowerCase().startsWith('image/')) {
+    return {
+      ok: false,
+      reason: `Invalid wearable image payload (${params.mimeType || 'unknown type'}, ${params.byteSize} bytes)`,
+    };
+  }
+  return { ok: true };
+}
+
+function verifyImageUrlDecodes(objectUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+        resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      } else {
+        reject(new Error('Decoded wearable frame had zero dimensions.'));
+      }
+    };
+    img.onerror = () => reject(new Error('Corrupted wearable image payload failed to decode.'));
+    img.src = objectUrl;
+  });
+}
+
 interface UseWearableFramesOptions {
   deviceId: string;
   enabled: boolean;
@@ -25,7 +66,9 @@ export function useWearableFrames({
   const objectUrlRef = useRef<string | null>(null);
   const latestBlobRef = useRef<Blob | null>(null);
   const lastSequenceRef = useRef<number | null>(null);
+  const lastStatusRef = useRef<DeviceSourceMode>('disconnected');
   const inFlightRef = useRef<boolean>(false);
+  const sessionIdRef = useRef<number>(0);
   const backoffMsRef = useRef<number>(pollIntervalMs);
 
   const revokeCurrentUrl = useCallback(() => {
@@ -37,27 +80,47 @@ export function useWearableFrames({
   }, []);
 
   useEffect(() => {
+    sessionIdRef.current += 1;
+    const currentSession = sessionIdRef.current;
+
     if (!enabled) {
       revokeCurrentUrl();
       setImageUrl(null);
       setSequence(null);
+      setFrameAgeMs(null);
       setIsStale(true);
       setDimensions(null);
+      setErrorMessage(null);
       lastSequenceRef.current = null;
+      lastStatusRef.current = 'disconnected';
       return;
     }
+
+    // Reset sequence & previous URL when deviceId changes or re-enabled
+    revokeCurrentUrl();
+    setImageUrl(null);
+    setSequence(null);
+    lastSequenceRef.current = null;
+    lastStatusRef.current = 'disconnected';
+    backoffMsRef.current = pollIntervalMs;
 
     let cancelled = false;
     let timerId: ReturnType<typeof setTimeout> | null = null;
     const abortController = new AbortController();
 
     const pollOnce = async () => {
-      if (cancelled || inFlightRef.current) return;
+      if (cancelled || sessionIdRef.current !== currentSession || inFlightRef.current) return;
       inFlightRef.current = true;
 
       try {
         const status = await fetchFrameStatus(deviceId, abortController.signal);
-        if (cancelled) return;
+        if (cancelled || sessionIdRef.current !== currentSession) return;
+
+        // If device reconnected after disconnect, force reload even if sequence restarted at 0/1
+        if (lastStatusRef.current === 'disconnected' && status.connectionStatus !== 'disconnected') {
+          lastSequenceRef.current = null;
+        }
+        lastStatusRef.current = status.connectionStatus;
 
         setConnectionStatus(status.connectionStatus);
         setFrameAgeMs(status.frameAgeMs);
@@ -66,21 +129,52 @@ export function useWearableFrames({
         setErrorMessage(null);
         backoffMsRef.current = pollIntervalMs;
 
-        if (status.frameAvailable && status.sequence !== null && status.sequence !== lastSequenceRef.current) {
+        const shouldFetchFrame =
+          status.frameAvailable &&
+          status.sequence !== null &&
+          (status.sequence !== lastSequenceRef.current || status.sequence < (lastSequenceRef.current ?? 0));
+
+        if (shouldFetchFrame) {
           const latest = await fetchLatestFrameBlob(deviceId, abortController.signal);
-          if (cancelled) return;
+          if (cancelled || sessionIdRef.current !== currentSession) return;
 
-          const nextUrl = URL.createObjectURL(latest.blob);
-          const prevUrl = objectUrlRef.current;
-          objectUrlRef.current = nextUrl;
-          latestBlobRef.current = latest.blob;
-          lastSequenceRef.current = latest.sequence ?? status.sequence;
+          const check = validateWearableFramePayload({
+            expectedDeviceId: deviceId,
+            responseDeviceIdHeader: latest.deviceIdHeader,
+            mimeType: latest.blob.type,
+            byteSize: latest.blob.size,
+            frameAgeMs: status.frameAgeMs,
+            staleFlag: latest.stale,
+          });
+          if (!check.ok) {
+            setErrorMessage(check.reason || 'Invalid wearable frame received.');
+            return;
+          }
 
-          setImageUrl(nextUrl);
-          setSequence(lastSequenceRef.current);
-          setIsStale(latest.stale);
-          if (prevUrl) {
-            URL.revokeObjectURL(prevUrl);
+          const candidateUrl = URL.createObjectURL(latest.blob);
+          try {
+            const decodedDims = await verifyImageUrlDecodes(candidateUrl);
+            if (cancelled || sessionIdRef.current !== currentSession) {
+              URL.revokeObjectURL(candidateUrl);
+              return;
+            }
+            const prevUrl = objectUrlRef.current;
+            objectUrlRef.current = candidateUrl;
+            latestBlobRef.current = latest.blob;
+            lastSequenceRef.current = latest.sequence ?? status.sequence;
+
+            setImageUrl(candidateUrl);
+            setDimensions(decodedDims);
+            setSequence(lastSequenceRef.current);
+            setIsStale(latest.stale);
+            if (prevUrl) {
+              URL.revokeObjectURL(prevUrl);
+            }
+          } catch (decodeErr: any) {
+            URL.revokeObjectURL(candidateUrl);
+            if (!cancelled && sessionIdRef.current === currentSession) {
+              setErrorMessage(decodeErr?.message || 'Wearable JPEG failed image decode validation.');
+            }
           }
         } else if (!status.frameAvailable) {
           revokeCurrentUrl();
@@ -89,12 +183,12 @@ export function useWearableFrames({
           lastSequenceRef.current = null;
         }
       } catch (err: any) {
-        if (cancelled || err?.name === 'AbortError') return;
+        if (cancelled || sessionIdRef.current !== currentSession || err?.name === 'AbortError') return;
         setErrorMessage(err?.message || 'Wearable frame poll error');
         backoffMsRef.current = Math.min(8000, backoffMsRef.current * 2);
       } finally {
         inFlightRef.current = false;
-        if (!cancelled) {
+        if (!cancelled && sessionIdRef.current === currentSession) {
           timerId = setTimeout(pollOnce, backoffMsRef.current);
         }
       }

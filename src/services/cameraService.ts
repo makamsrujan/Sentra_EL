@@ -16,9 +16,11 @@ export interface CapturedFrameResult {
 
 export type BrowserCameraErrorType =
   | 'permission_denied'
+  | 'os_permission_denied'
   | 'blocked_by_embed'
   | 'https_required'
   | 'unavailable'
+  | 'invalid_device_id'
   | 'unsupported'
   | 'in_use'
   | 'disconnected'
@@ -89,7 +91,8 @@ export async function inspectCameraEnvironment(): Promise<CameraEnvironmentInfo>
 
 export function classifyCameraError(
   err: any,
-  env: CameraEnvironmentInfo
+  env: CameraEnvironmentInfo,
+  ctx: { hadExplicitDeviceId?: boolean } = {}
 ): { type: Exclude<BrowserCameraErrorType, null>; message: string } {
   if (!env.isSecureContext) {
     return {
@@ -109,25 +112,35 @@ export function classifyCameraError(
   const rawMsg = String(err?.message || '').toLowerCase();
 
   if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
-    const looksLikeEmbedRestriction =
+    // Only blame embedded Permissions Policy when PermissionsPolicy explicitly blocks it
+    // or the browser error message explicitly names a frame/policy restriction.
+    const confirmedEmbedPolicyBlock =
       env.permissionsPolicyBlocked ||
       rawMsg.includes('permissions policy') ||
       rawMsg.includes('feature policy') ||
       rawMsg.includes('disallowed') ||
-      (env.isEmbeddedIframe && env.permissionState !== 'denied');
+      rawMsg.includes('iframe');
 
-    if (looksLikeEmbedRestriction) {
+    if (confirmedEmbedPolicyBlock) {
       return {
         type: 'blocked_by_embed',
         message:
-          'Camera access is blocked by the embedded preview frame (Permissions Policy). Open SENTRA directly in a top-level HTTPS browser tab.',
+          'Camera access is blocked by this embedded preview frame (Permissions Policy). Open SENTRA directly in a top-level HTTPS browser tab.',
+      };
+    }
+
+    if (env.permissionState === 'granted') {
+      return {
+        type: 'os_permission_denied',
+        message:
+          'Site camera permission shows as granted, but OS privacy controls or browser security blocked hardware access. Check system Camera Privacy settings (or open a top-level HTTPS tab) and retry.',
       };
     }
 
     return {
       type: 'permission_denied',
       message:
-        'Camera permission was denied by the browser or OS settings. Allow camera access for this site and tap Retry Camera.',
+        'Camera permission was denied for this site. Allow camera access in your browser site settings and tap Retry Camera.',
     };
   }
 
@@ -138,10 +151,18 @@ export function classifyCameraError(
     };
   }
 
-  if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+  if (name === 'OverconstrainedError' || (name === 'NotFoundError' && ctx.hadExplicitDeviceId)) {
+    return {
+      type: 'invalid_device_id',
+      message:
+        'The previously selected camera device ID is unavailable or unsupported. Resetting to Auto camera selection and retrying may resolve this.',
+    };
+  }
+
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
     return {
       type: 'unavailable',
-      message: 'No compatible camera device was detected or the selected camera is no longer available.',
+      message: 'No compatible camera device was detected on this device.',
     };
   }
 

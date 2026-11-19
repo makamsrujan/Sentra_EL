@@ -5,7 +5,15 @@ import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
 import { SentraEventStore } from './server/eventStore';
 import { DeviceGateway } from './server/deviceGateway';
-import { getConfiguredModel, isGeminiApiKeyConfigured, runSentraAnalysis } from './server/geminiService';
+import {
+  getConfiguredModel,
+  getLastWorkingModel,
+  isGeminiApiKeyConfigured,
+  runGeminiDiagnostic,
+  runSentraAnalysis,
+  SUPPORTED_MODELS,
+  validateConfiguredModel,
+} from './server/geminiService';
 import {
   AckActionsSchema,
   AnalyzeRequestSchema,
@@ -33,20 +41,42 @@ function extractBearerOrHeaderToken(req: express.Request): string | undefined {
   return undefined;
 }
 
-function isSimulatorAllowed(req: express.Request, gateway: DeviceGateway): { allowed: boolean; reason?: string } {
+function requireOperatorAuth(req: express.Request): { ok: true } | { ok: false; status: number; error: string } {
+  const opToken = process.env.SENTRA_OPERATOR_TOKEN?.trim();
+  if (!opToken) {
+    return {
+      ok: false,
+      status: 503,
+      error:
+        'Operator credentials (SENTRA_OPERATOR_TOKEN) are not configured on the server; administrative registration, simulator, and event-clear actions are disabled.',
+    };
+  }
+  const opHeader = req.header('x-operator-token')?.trim();
+  const provided = opHeader || extractBearerOrHeaderToken(req);
+  if (!provided || provided !== opToken) {
+    return {
+      ok: false,
+      status: 401,
+      error: 'Operator authentication required. Provide valid X-Operator-Token or Authorization: Bearer <token>.',
+    };
+  }
+  return { ok: true };
+}
+
+function isSimulatorAllowed(
+  req: express.Request,
+  gateway: DeviceGateway
+): { allowed: boolean; status?: number; reason?: string } {
   if (!gateway.isSimulatorEnabled()) {
-    return { allowed: false, reason: 'Simulator endpoints are disabled (SENTRA_SIMULATOR_ENABLED=false).' };
+    return { allowed: false, status: 403, reason: 'Simulator endpoints are disabled (SENTRA_SIMULATOR_ENABLED=false).' };
   }
   const simHeader = req.header('x-sentra-simulator');
   if (simHeader !== 'true') {
-    return { allowed: false, reason: 'Missing X-Sentra-Simulator: true confirmation header.' };
+    return { allowed: false, status: 403, reason: 'Missing X-Sentra-Simulator: true confirmation header.' };
   }
-  const opToken = process.env.SENTRA_OPERATOR_TOKEN?.trim();
-  if (opToken) {
-    const provided = extractBearerOrHeaderToken(req);
-    if (provided !== opToken) {
-      return { allowed: false, reason: 'Operator authentication required for simulator endpoints.' };
-    }
+  const opAuth = requireOperatorAuth(req);
+  if (!opAuth.ok) {
+    return { allowed: false, status: opAuth.status, reason: opAuth.error };
   }
   return { allowed: true };
 }
@@ -75,6 +105,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     const primary = gateway.getLiveState();
     const now = Date.now();
     const dbOk = store.isAvailable();
+    const modelValidation = validateConfiguredModel();
     res.json({
       status: dbOk ? 'ok' : 'degraded',
       name: 'SENTRA Assistive Vision Companion',
@@ -82,6 +113,12 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       databaseError: store.getError(),
       hasApiKey: isGeminiApiKeyConfigured(),
       configuredModel: getConfiguredModel(),
+      rawConfiguredModel: modelValidation.rawConfiguredModel,
+      modelConfigValid: modelValidation.valid,
+      modelConfigError: modelValidation.errorMessage,
+      supportedModels: [...SUPPORTED_MODELS],
+      lastWorkingModel: getLastWorkingModel(),
+      operatorAuthConfigured: Boolean(process.env.SENTRA_OPERATOR_TOKEN?.trim()),
       simulatorEnabled: gateway.isSimulatorEnabled(),
       deviceAuthRequired: true,
       heartbeatTimeoutMs: gateway.getHeartbeatTimeoutMs(),
@@ -91,6 +128,11 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
         primary?.lastTelemetryAt != null ? Math.max(0, now - primary.lastTelemetryAt) : null,
       lastFrameAgeMs: primary?.frameAgeMs ?? null,
     });
+  });
+
+  app.post('/api/gemini/diagnostic', async (_req, res) => {
+    const diagnostic = await runGeminiDiagnostic();
+    return res.json(diagnostic);
   });
 
   // -------------------------------------------------------------
@@ -140,9 +182,9 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
   });
 
   app.post('/api/device/register', (req, res) => {
-    const opToken = process.env.SENTRA_OPERATOR_TOKEN?.trim();
-    if (opToken && extractBearerOrHeaderToken(req) !== opToken) {
-      return res.status(401).json({ ok: false, error: 'Operator token required to register devices.' });
+    const opAuth = requireOperatorAuth(req);
+    if (!opAuth.ok) {
+      return res.status(opAuth.status).json({ ok: false, error: opAuth.error });
     }
 
     const parsed = DeviceRegistrationSchema.safeParse(req.body);
@@ -344,7 +386,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
   app.post('/api/device/simulate', (req, res) => {
     const guard = isSimulatorAllowed(req, gateway);
     if (!guard.allowed) {
-      return res.status(403).json({ ok: false, error: guard.reason });
+      return res.status(guard.status ?? 403).json({ ok: false, error: guard.reason });
     }
 
     const simId = 'SIM-ESP32-01';
@@ -407,7 +449,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
   app.post('/api/device/simulate/frame', (req, res) => {
     const guard = isSimulatorAllowed(req, gateway);
     if (!guard.allowed) {
-      return res.status(403).json({ ok: false, error: guard.reason });
+      return res.status(guard.status ?? 403).json({ ok: false, error: guard.reason });
     }
 
     const simId = 'SIM-ESP32-01';
@@ -457,7 +499,11 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     res.json(store.exportAllData());
   });
 
-  app.delete('/api/events', (_req, res) => {
+  app.delete('/api/events', (req, res) => {
+    const opAuth = requireOperatorAuth(req);
+    if (!opAuth.ok) {
+      return res.status(opAuth.status).json({ ok: false, error: opAuth.error });
+    }
     store.clearTelemetryEvents();
     return res.json({ ok: true });
   });
