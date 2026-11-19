@@ -1,49 +1,41 @@
-// Kconfig for SENTRA ESP32-S3 firmware
-// This file defines project configuration options.
-
-menu "SENTRA Firmware Configuration"
+# SENTRA device configuration. Never commit sdkconfig files containing secrets.
+menu "SENTRA firmware configuration"
 
 config SENTRA_WIFI_SSID
     string "Wi-Fi SSID"
-    default "your-ssid"
-    help
-      The SSID of the Wi-Fi network the device should connect to.
+    default ""
 
 config SENTRA_WIFI_PASSWORD
-    string "Wi-Fi Password"
-    default "your-password"
-    help
-      Password for the Wi-Fi network.
+    string "Wi-Fi password"
+    default ""
 
 config SENTRA_BACKEND_URL
-    string "Backend server URL"
-    default "https://your-backend.example.com"
-    help
-      Base URL of the SENTRA backend (e.g., https://example.com).
+    string "Backend origin (local HTTP only until TLS CA configured)"
+    default ""
 
 config SENTRA_DEVICE_ID
-    string "Device ID"
-    default "sentra-001"
-    help
-      Unique identifier for this device instance.
+    string "Registered device ID"
+    default "ESP32-S3-SENTRA-001"
 
 config SENTRA_DEVICE_TOKEN
-    string "Device Token"
+    string "Provisioned device token (secret; keep sdkconfig out of git)"
     default ""
-    help
-      Authentication token for the device (empty if not used).
 
-config SENTRA_ENABLE_INA219
-    bool "Enable optional INA219 power monitor"
+config SENTRA_ENABLE_CAMERA
+    bool "Enable OV2640 capture (requires verified board wiring)"
     default n
-    help
-      Build with support for INA219 if the board includes it.
 
 config SENTRA_ENABLE_VAD
-    bool "Enable network‑assisted wake‑word VAD"
-    default y
+    bool "Enable on-device voice activity detection"
+    default n
     help
-      Enable the voice‑activity‑detection task that records short audio bursts
-      and uploads them for wake‑word verification.
+        Unavailable until a real voice activity detector is implemented.
+        This flag is deliberately not interpreted as proof of wake-word support.
+
+config SENTRA_ENABLE_INA219
+    bool "Enable optional power monitor"
+    default n
+    help
+        Requires implementation and verified INA219 wiring.
 
 endmenu
