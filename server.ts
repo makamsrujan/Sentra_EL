@@ -3,7 +3,6 @@ import dotenv from 'dotenv';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer as createViteServer } from 'vite';
 import { SentraEventStore } from './server/eventStore';
 import { DeviceGateway } from './server/deviceGateway';
 import { AudioReplyStore } from './server/audio/audioReplyStore';
@@ -92,6 +91,7 @@ function isSimulatorAllowed(
 
 export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?: number }) {
   const app = express();
+  app.set('trust proxy', 1);
   const store = new SentraEventStore(options?.dbPath);
   const gateway = new DeviceGateway(store, options?.heartbeatTimeoutMs);
 
@@ -902,6 +902,7 @@ async function startServer() {
       res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   } else {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
