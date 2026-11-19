@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { fetchAnalyticsSummary, fetchDeviceStatus } from '../services/deviceApi';
 import type { AnalyticsSummary, DeviceLiveState } from '../types/deviceProtocol';
+import type { GoalTask } from '../types/sentra';
 
 interface UseDeviceTelemetryOptions {
   selectedDeviceId: string;
@@ -11,6 +12,7 @@ interface UseDeviceTelemetryOptions {
     severity: 'caution' | 'critical';
     description: string;
   }) => void;
+  onGoalUpdate?: (update: { deviceId: string; goal: GoalTask | null }) => void;
   onVoiceTurn?: (turn: {
     turnId: string;
     deviceId: string;
@@ -27,7 +29,7 @@ interface UseDeviceTelemetryOptions {
   }) => void;
 }
 
-export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn }: UseDeviceTelemetryOptions) {
+export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn, onGoalUpdate }: UseDeviceTelemetryOptions) {
   const [devices, setDevices] = useState<DeviceLiveState[]>([]);
   const [activeDevice, setActiveDevice] = useState<DeviceLiveState | null>(null);
   const [sseConnected, setSseConnected] = useState(false);
@@ -41,6 +43,8 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn }: U
   onAlertRef.current = onAlert;
   const onVoiceTurnRef = useRef(onVoiceTurn);
   onVoiceTurnRef.current = onVoiceTurn;
+  const onGoalUpdateRef = useRef(onGoalUpdate);
+  onGoalUpdateRef.current = onGoalUpdate;
   const lastAlertKeyRef = useRef<{ key: string; ts: number }>({ key: '', ts: 0 });
   const selectedDeviceRef = useRef(selectedDeviceId);
   selectedDeviceRef.current = selectedDeviceId;
@@ -174,6 +178,16 @@ export function useDeviceTelemetry({ selectedDeviceId, onAlert, onVoiceTurn }: U
                 description: first.description,
               });
             }
+          }
+        } catch {}
+      });
+
+      es.addEventListener('goal_update', (ev: MessageEvent) => {
+        if (closed) return;
+        try {
+          const update = JSON.parse(ev.data) as { deviceId: string; goal: GoalTask | null };
+          if (update.deviceId === selectedDeviceRef.current || !selectedDeviceRef.current) {
+            onGoalUpdateRef.current?.(update);
           }
         } catch {}
       });
