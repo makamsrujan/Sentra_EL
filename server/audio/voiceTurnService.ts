@@ -242,21 +242,33 @@ export async function processWearableVoiceTurn(
   // 7. Update persistent goal state across wearable and frontend
   let activeGoal = gateway.getActiveGoal(deviceId);
   if (intent.mode === 'find' || intent.goal) {
+    const now = Date.now();
+    // Preserve the task's identity and verification history across subsequent turns.
+    const state: GoalTask['state'] = analysis.foundTarget ? 'completed' : 'active';
     activeGoal = {
-      id: activeGoal?.id || `goal-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
+      id: activeGoal?.id || `goal-${now}-${crypto.randomBytes(3).toString('hex')}`,
       intent: intent.query || command || transcript,
-      targetObject: intent.goal || undefined,
-      state: analysis.foundTarget ? 'completed' : 'active',
+      targetObject: intent.goal || activeGoal?.targetObject,
+      state,
       requiredObservation: analysis.activePerceptionRequest || 'Scan environment to spot the target.',
       nextSafeAction: analysis.suggestedAction || analysis.reachGuidance?.handInstruction || null,
+      confidence: activeGoal?.confidence ?? null,
+      createdAt: activeGoal?.createdAt ?? now,
+      updatedAt: now,
+      history: [...(activeGoal?.history ?? []), { timestamp: now, note: 'Wearable voice turn processed', state }],
+      verificationSteps: activeGoal?.verificationSteps ?? [],
     };
     gateway.setActiveGoal(deviceId, activeGoal);
   } else if (analysis.goalUpdate && activeGoal) {
+    const now = Date.now();
+    const state = (analysis.goalUpdate.state as GoalTask['state']) || activeGoal.state;
     activeGoal = {
       ...activeGoal,
       targetObject: analysis.goalUpdate.targetObject || activeGoal.targetObject,
-      state: (analysis.goalUpdate.state as GoalTask['state']) || activeGoal.state,
+      state,
       nextSafeAction: analysis.goalUpdate.nextAction || activeGoal.nextSafeAction,
+      updatedAt: now,
+      history: [...activeGoal.history, { timestamp: now, note: 'Wearable goal updated', state }],
     };
     gateway.setActiveGoal(deviceId, activeGoal);
   }
