@@ -320,11 +320,13 @@ export const CameraView = forwardRef<CameraViewHandle, CameraViewProps>(
           }
         : { width: viewportSize.width, height: viewportSize.height };
 
+    // Never display historical detections over a different or stale camera source.
     const showOverlayBoxes =
+      !detectionStale &&
       detectedObjects.length > 0 &&
-      (camera.isStreaming ||
-        (cameraSource === 'esp32_camera' && Boolean(wearableFrames.imageUrl)) ||
-        Boolean(inspectionImageUrl));
+      (Boolean(inspectionImageUrl) ||
+        (cameraSource === 'browser_camera' && camera.isStreaming) ||
+        (cameraSource === 'esp32_camera' && Boolean(wearableFrames.imageUrl) && !wearableFrames.isStale));
 
     return (
       <div className="space-y-2.5">
