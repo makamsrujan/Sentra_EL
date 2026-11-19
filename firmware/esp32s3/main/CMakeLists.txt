@@ -5,12 +5,10 @@ idf_component_register(
         "../src/i2s_audio.c"
         "../src/audio_http.c"
         "../src/local_alerts.c"
-    INCLUDE_DIRS
-        "../include"
-    REQUIRES
-        driver
-        esp_http_client
-        json
-        nvs_flash
-        mbedtls
+        "../src/wifi_transport.c"
+        "../src/camera_driver.c"
+        "../src/device_telemetry.c"
+    INCLUDE_DIRS "../include"
+    REQUIRES driver esp_http_client json nvs_flash mbedtls
+             esp_wifi esp_event esp_netif esp_timer esp32-camera
 )

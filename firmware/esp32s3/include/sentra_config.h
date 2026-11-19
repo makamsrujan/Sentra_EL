@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "sdkconfig.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,11 +21,12 @@ extern "C" {
 /* ========================================================================= */
 /* 1. HARDWARE IDENTIFIERS & NETWORK CONFIGURATION                           */
 /* ========================================================================= */
-#define SENTRA_DEVICE_ID              "ESP32-S3-SENTRA-001"
-#define SENTRA_DEFAULT_SERVER_URL     "http://192.168.1.100:3000"
-#define SENTRA_DEFAULT_DEVICE_TOKEN   "sentra-dev-key-default"
-#define SENTRA_WIFI_SSID              "YOUR_WIFI_SSID"
-#define SENTRA_WIFI_PASS              "YOUR_WIFI_PASSWORD"
+/* Locally provision with idf.py menuconfig; sdkconfig contains secrets. */
+#define SENTRA_DEVICE_ID              CONFIG_SENTRA_DEVICE_ID
+#define SENTRA_DEFAULT_SERVER_URL     CONFIG_SENTRA_BACKEND_URL
+#define SENTRA_DEFAULT_DEVICE_TOKEN   CONFIG_SENTRA_DEVICE_TOKEN
+#define SENTRA_WIFI_SSID              CONFIG_SENTRA_WIFI_SSID
+#define SENTRA_WIFI_PASS              CONFIG_SENTRA_WIFI_PASSWORD
 
 /* ========================================================================= */
 /* 2. GPIO PINOUT COEXISTENCE MATRIX                                         */

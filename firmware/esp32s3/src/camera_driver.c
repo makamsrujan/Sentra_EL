@@ -17,7 +17,7 @@ static camera_fb_t *s_active_fb = NULL;
 esp_err_t camera_driver_init(void) {
     ESP_LOGI(TAG, "Initializing OV2640 camera on parallel DVP bus...");
 
-    camera_config_t config;
+    camera_config_t config = {0};
     config.ledc_channel = LEDC_CHANNEL_0;
     config.ledc_timer = LEDC_TIMER_0;
     config.pin_d0 = BOARD_PIN_CAM_D0;
