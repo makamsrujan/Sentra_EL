@@ -496,29 +496,27 @@ export function useVoiceAssistant({
           setMicTestActive(false);
         }
 
-        if (targetMode === 'command') {
-          if (audioFeedbackRef.current) {
-            playChime('start_listen');
-          }
-          commandTimeoutRef.current = setTimeout(() => {
-            if (sessionIdRef.current !== mySessionId) return;
-            cleanupRecognition();
-            setLiveTranscript('');
-            if (audioFeedbackRef.current) {
-              playChime('stop_listen');
-            }
-            setMode('idle');
-          }, 8000);
-        } else if (targetMode === 'ptt') {
-          if (audioFeedbackRef.current) {
-            playChime('start_listen');
-          }
+        // Do not start the command timeout before the browser has actually
+        // started recognition (permission prompts can take several seconds).
+        if ((targetMode === 'command' || targetMode === 'ptt') && audioFeedbackRef.current) {
+          playChime('start_listen');
         }
 
         rec.onstart = () => {
           if (sessionIdRef.current !== mySessionId) return;
           lastSessionStartRef.current = Date.now();
           setRecognitionPhase('active');
+          if (targetMode === 'command') {
+            commandTimeoutRef.current = setTimeout(() => {
+              if (sessionIdRef.current !== mySessionId) return;
+              cleanupRecognition();
+              setLiveTranscript('');
+              if (audioFeedbackRef.current) {
+                playChime('stop_listen');
+              }
+              setMode('idle');
+            }, 8000);
+          }
         };
 
         rec.onresult = (event: any) => {
