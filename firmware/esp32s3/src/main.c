@@ -11,6 +11,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
@@ -24,6 +25,9 @@
 #include "i2s_audio.h"
 #include "local_alerts.h"
 #include "audio_http.h"
+#include "wifi_transport.h"
+#include "camera_driver.h"
+#include "device_telemetry.h"
 
 static const char *TAG = "SENTRA_MAIN";
 
@@ -157,7 +161,7 @@ static void audio_lifecycle_task(void *pvParameters) {
  * Triggers autonomous immediate local alert tones directly without cloud dependency.
  */
 static void sensor_safety_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Autonomous sensor safety monitor started.");
+    ESP_LOGW(TAG, "ToF ranging is not implemented in this commit: local sensor warnings are INACTIVE");
 
     while (1) {
         // In real hardware, read VL53L0X forward distance & ground cliff distance via I2C.
@@ -169,6 +173,28 @@ static void sensor_safety_task(void *pvParameters) {
         // }
 
         vTaskDelay(pdMS_TO_TICKS(100)); // 10 Hz obstacle scanning loop
+    }
+}
+
+/* Camera enabled only after manual confirmation of provisional GPIO pinout. */
+static bool s_camera_ready = false;
+
+static void camera_upload_task(void *argument) {
+    (void)argument;
+    uint32_t frame_sequence = 1;
+    for (;;) {
+        if (s_camera_ready && wifi_transport_is_connected() &&
+            SENTRA_DEFAULT_DEVICE_TOKEN[0] != 0) {
+            sentra_camera_frame_t frame = {0};
+            if (camera_driver_capture(&frame) == ESP_OK) {
+                esp_err_t result = camera_driver_upload_frame(
+                    &frame, SENTRA_DEFAULT_SERVER_URL, SENTRA_DEVICE_ID,
+                    SENTRA_DEFAULT_DEVICE_TOKEN, frame_sequence++);
+                camera_driver_release(&frame);
+                if (result != ESP_OK) ESP_LOGW(TAG, "Camera JPEG upload unsuccessful");
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1200));
     }
 }
 
@@ -204,9 +230,33 @@ void app_main(void) {
         ESP_LOGE(TAG, "I2S driver initialization failed: %s", esp_err_to_name(ret));
     }
 
+    /* Configure local Wi-Fi backend credentials with idf.py menuconfig.
+       Device must be registered with the operator to obtain its token. */
+    if (SENTRA_WIFI_SSID[0] != 0 && SENTRA_DEFAULT_SERVER_URL[0] != 0 &&
+        SENTRA_DEFAULT_DEVICE_TOKEN[0] != 0) {
+        ret = wifi_transport_init();
+        if (ret == ESP_OK) ret = wifi_transport_connect(SENTRA_WIFI_SSID, SENTRA_WIFI_PASS);
+        if (ret != ESP_OK) ESP_LOGE(TAG, "Wi-Fi initialization failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGW(TAG, "Wi-Fi not configured: set SSID, backend URL and device token");
+    }
+
+#if CONFIG_SENTRA_ENABLE_CAMERA
+    ret = camera_driver_init();
+    s_camera_ready = ret == ESP_OK;
+    if (!s_camera_ready) ESP_LOGW(TAG, "Camera unavailable: %s", esp_err_to_name(ret));
+#else
+    ESP_LOGW(TAG, "Camera disabled: board-specific DVP pin and cable verification pending");
+#endif
+    sentra_telemetry_set_camera_initialized(s_camera_ready);
+
     // Launch FreeRTOS Tasks
     xTaskCreatePinnedToCore(audio_lifecycle_task, "audio_task", 8192, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(sensor_safety_task, "sensor_task", 4096, NULL, 10, NULL, 0);
+    xTaskCreatePinnedToCore(sentra_telemetry_task, "telemetry_task", 6144, NULL, 4, NULL, 0);
+#if CONFIG_SENTRA_ENABLE_CAMERA
+    if (s_camera_ready) xTaskCreatePinnedToCore(camera_upload_task, "camera_task", 6144, NULL, 4, NULL, 0);
+#endif
 
     ESP_LOGI(TAG, "SENTRA Wearable Firmware initialized successfully. System is in STANDBY.");
 }
