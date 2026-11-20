@@ -1,12 +1,11 @@
 import { ParsedVoiceIntent } from '../types/sentra';
 
-export type TrialCategory = 'object_finder' | 'walk_assistant' | 'obstacles' | 'general';
-
 export function parseVoiceIntent(query: string): ParsedVoiceIntent {
-  const clean = query
-    .trim()
-    .replace(/^(?:hey|okay|ok)\s*,?\s*(?:sentra|centra|sendra)\b[\s,.:;!?-]*/i, '')
-    .trim() || query.trim();
+  const clean =
+    query
+      .trim()
+      .replace(/^(?:hey|okay|ok)\s*,?\s*(?:sentra|centra|sendra)\b[\s,.:;!?-]*/i, '')
+      .trim() || query.trim();
   const lower = clean.toLowerCase();
 
   // 1. Device / Wearable / Battery status query (does not need camera)
@@ -22,9 +21,10 @@ export function parseVoiceIntent(query: string): ParsedVoiceIntent {
     };
   }
 
-  // 2. General Obstacles & Pathway Safety (must come BEFORE generic "find ..." so "finding obstacles" is scene_analysis)
+  // 2. Obstacles, Overhead Hanging Hazards, Road Crossing, Traffic Signals & Approaching Vehicles/EVs
+  // Must come BEFORE generic "find ..." so "finding obstacles" routes to scene_analysis
   if (
-    /\b(obstacl\w*|obstucl\w*|hazards?|blocking my path|path is clear|is my way clear|is it safe to walk|anything in my way|is the path clear|clear to step|in my path|watch out|check ahead)\b/i.test(
+    /\b(obstacl\w*|obstucl\w*|hazards?|blocking my path|path is clear|is my way clear|is it safe to walk|anything in my way|is the path clear|clear to step|in my path|watch out|check ahead|hanging|overhead|above my head|head level|cross(?:ing)? (?:the )?road|traffic (?:light|signal)|pedestrian signal|signal color|any (?:cars?|vehicles?|bikes?|autos?|traffic|ev|electric vehicles?)|bus coming|approaching)\b/i.test(
       lower
     )
   ) {
@@ -72,7 +72,20 @@ export function parseVoiceIntent(query: string): ParsedVoiceIntent {
     };
   }
 
-  // 5. Active Object Finder (e.g. "Find the water bottle", "Where is my phone?")
+  // 5. Read Signage, Bus Numbers/Stops, Shop Names, Supermarket Products/Expiry/MRP & QR Codes
+  if (
+    /\b(read|what does (?:it|this) say|text|words|labels?|signs?|signboard|receipt|document|transcribe|which bus|bus number|bus stop|stop name|what shop|shop name|store name|what product|identify (?:this )?product|packet|bottle label|expiry|price|mrp|qr code|barcode)\b/i.test(
+      lower
+    )
+  ) {
+    return {
+      mode: 'read',
+      operation: 'scene_analysis',
+      query: clean,
+    };
+  }
+
+  // 6. Active Object Finder (e.g. "Find the water bottle", "Where is my phone?")
   const findMatch = lower.match(
     /(?:(?:can you |please |help me (?:to )?)?(?:find|finding|locate|look for|search for|spot|show me)|where (?:is|are))\s+(?:my |the |a |an )?(.+)/i
   );
@@ -82,19 +95,6 @@ export function parseVoiceIntent(query: string): ParsedVoiceIntent {
       mode: 'find',
       operation: 'object_query',
       goal: rawGoal,
-      query: clean,
-    };
-  }
-
-  // 6. Read Text
-  if (
-    /\b(read|what does (?:it|this) say|text|words|labels?|signs?|receipt|document|transcribe)\b/i.test(
-      lower
-    )
-  ) {
-    return {
-      mode: 'read',
-      operation: 'scene_analysis',
       query: clean,
     };
   }
@@ -131,29 +131,4 @@ export function parseVoiceIntent(query: string): ParsedVoiceIntent {
     operation: 'conversation',
     query: clean,
   };
-}
-
-export function classifyTrialCategory(query: string): TrialCategory {
-  const intent = parseVoiceIntent(query);
-  const lower = intent.query.toLowerCase();
-
-  if (
-    /\b(obstacl\w*|obstucl\w*|hazards?|blocking my path|path is clear|is my way clear|is it safe to walk|anything in my way|is the path clear|clear to step|in my path|check ahead)\b/i.test(
-      lower
-    )
-  ) {
-    return 'obstacles';
-  }
-  if (
-    intent.mode === 'navigate' ||
-    /\b(walk|door|stairs|hallway|exit|corridor|surroundings|in front of me|scene|describe)\b/i.test(
-      lower
-    )
-  ) {
-    return 'walk_assistant';
-  }
-  if (intent.mode === 'find') {
-    return 'object_finder';
-  }
-  return 'general';
 }

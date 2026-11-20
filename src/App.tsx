@@ -17,12 +17,7 @@ import {
   ReachGuidance,
 } from './types/sentra';
 import type { CameraSourceType } from './types/deviceProtocol';
-import { classifyTrialCategory, parseVoiceIntent } from './utils/parser';
-import {
-  TrialTrackerCard,
-  type TrialEntry,
-  MAX_TRIAL_QUESTIONS,
-} from './components/TrialTrackerCard';
+import { parseVoiceIntent } from './utils/parser';
 import {
   playChime,
   setAudioConfig,
@@ -64,7 +59,16 @@ import {
 
 const MEMORY_STORAGE_KEY = 'sentra.memory.v2';
 const SETTINGS_STORAGE_KEY = 'sentra.settings.v2';
-const TRIAL_STORAGE_KEY = 'sentra.trial.v1';
+
+const SUPPORTED_LANGUAGES = [
+  { code: 'en-IN', label: 'English' },
+  { code: 'hi-IN', label: 'हिन्दी' },
+  { code: 'kn-IN', label: 'ಕನ್ನಡ' },
+  { code: 'ta-IN', label: 'தமிழ்' },
+  { code: 'te-IN', label: 'తెలుగు' },
+  { code: 'mr-IN', label: 'मराठी' },
+  { code: 'ml-IN', label: 'മലയാളം' },
+] as const;
 
 const DEFAULT_SETTINGS: SentraSettings = {
   speechRate: 1.05,
@@ -79,6 +83,7 @@ const DEFAULT_SETTINGS: SentraSettings = {
   autoContinuousFind: false,
   continuousWatchMode: false,
   reachGuidanceEnabled: true,
+  language: 'en-IN',
 };
 
 export default function App() {
@@ -111,16 +116,6 @@ export default function App() {
   // Inline typed fallback (hidden unless mic unavailable or toggled)
   const [typedQuery, setTypedQuery] = useState('');
   const [showTextInput, setShowTextInput] = useState(false);
-
-  // 10-Question Trial State
-  const [trialEntries, setTrialEntries] = useState<TrialEntry[]>(() => {
-    try {
-      const stored = localStorage.getItem(TRIAL_STORAGE_KEY);
-      return stored ? (JSON.parse(stored) as TrialEntry[]).slice(0, MAX_TRIAL_QUESTIONS) : [];
-    } catch {
-      return [];
-    }
-  });
 
   // Persistence state
   const [memories, setMemories] = useState<SentraMemoryItem[]>(() => {
@@ -155,52 +150,16 @@ export default function App() {
   memoriesRef.current = memories;
   const isCameraReadyRef = useRef(isCameraReady);
   isCameraReadyRef.current = isCameraReady;
-  const trialEntriesRef = useRef(trialEntries);
-  trialEntriesRef.current = trialEntries;
   const historyRef = useRef<Array<{ role: 'user' | 'assistant'; text: string }>>([]);
 
-  const recordTrialEntry = useCallback(
-    (queryText: string, responseText: string, latencyMs: number, source: CameraSourceType) => {
-      if (!queryText.trim()) return;
-      setTrialEntries((prev) => {
-        if (prev.length >= MAX_TRIAL_QUESTIONS) return prev;
-        const entry: TrialEntry = {
-          id: `trial-${Date.now()}-${prev.length + 1}`,
-          questionNumber: prev.length + 1,
-          category: classifyTrialCategory(queryText),
-          query: queryText.trim(),
-          response: responseText,
-          inputSource: source === 'esp32_camera' ? 'esp32_camera' : 'browser_camera',
-          latencyMs,
-          timestamp: Date.now(),
-        };
-        const next = [entry, ...prev].slice(0, MAX_TRIAL_QUESTIONS);
-        try {
-          localStorage.setItem(TRIAL_STORAGE_KEY, JSON.stringify(next));
-        } catch {}
-        return next;
-      });
-    },
-    []
-  );
-
-  const handleResetTrial = useCallback(() => {
-    setTrialEntries([]);
-    setCurrentGoal(null);
-    setSpokenTranscript('');
-    setAssistantResponse('New 10-question trial ready. Press TAP TO SPEAK or say "Hey Sentra".');
-    try {
-      localStorage.removeItem(TRIAL_STORAGE_KEY);
-    } catch {}
-  }, []);
-
-  // Sync audio mute & volume config and reactive speaking state
+  // Sync audio mute, volume & language config and reactive speaking state
   useEffect(() => {
     setAudioConfig({
       muted: settings.voiceMuted,
       volume: settings.voiceVolume,
+      lang: settings.language || 'en-IN',
     });
-  }, [settings.voiceMuted, settings.voiceVolume]);
+  }, [settings.voiceMuted, settings.voiceVolume, settings.language]);
 
   useEffect(() => {
     return subscribeSpeakingState(setIsAudioSpeaking);
@@ -367,7 +326,6 @@ export default function App() {
       if (isProcessingRef.current) return false;
       isProcessingRef.current = true;
       setIsProcessing(true);
-      const startTime = performance.now();
 
       const curSettings = settingsRef.current;
       const curGoal = currentGoalRef.current;
@@ -435,14 +393,13 @@ export default function App() {
             heading,
             useWearableFrame: curSettings.cameraSource === 'esp32_camera',
             wearableDeviceId: curSettings.selectedWearableDeviceId,
+            language: curSettings.language || 'en-IN',
           },
           abortController.signal
         );
 
         isProcessingRef.current = false;
         setIsProcessing(false);
-
-        const latency = performance.now() - startTime;
 
         if (data.status !== 'ok' || data.errorCode) {
           let spoken = data.spokenResponse || data.text || 'Unable to analyze scene right now.';
@@ -466,7 +423,6 @@ export default function App() {
           }
 
           setAssistantResponse(spoken);
-          recordTrialEntry(query, spoken, latency, curSettings.cameraSource);
           speakText(spoken, curSettings.speechRate);
           return false;
         }
@@ -504,7 +460,9 @@ export default function App() {
           activeHazard?.severity === 'critical' && activeHazard.source === 'sensor_hardware';
         if (data.hazard && !hasActiveHardwareHazard) {
           setActiveHazard({ ...data.hazard, source: 'vision_ai', timestamp: Date.now() });
-          spoken = `Caution: ${data.hazard.description} at ${data.hazard.clockPosition}.`;
+          if (!data.spokenResponse) {
+            spoken = `Caution: ${data.hazard.description} at ${data.hazard.clockPosition}.`;
+          }
           if (curSettings.audioFeedback) playChime('hazard');
         } else if (!data.hazard && !hasActiveHardwareHazard) {
           setActiveHazard(null);
@@ -659,7 +617,6 @@ export default function App() {
         }
 
         setAssistantResponse(spoken);
-        recordTrialEntry(query, spoken, latency, curSettings.cameraSource);
         speakText(spoken, curSettings.speechRate);
         return true;
       } catch (err: any) {
@@ -679,12 +636,11 @@ export default function App() {
         );
 
         setAssistantResponse(localResult.text);
-        recordTrialEntry(query, localResult.text, performance.now() - startTime, curSettings.cameraSource);
         speakText(localResult.text, curSettings.speechRate);
         return false;
       }
     },
-    [activeHazard, currentRoom, firebase, recordTrialEntry, saveMemoriesLocally]
+    [activeHazard, currentRoom, firebase, saveMemoriesLocally]
   );
 
   // Handle incoming user voice or text query
@@ -701,14 +657,6 @@ export default function App() {
         if (settingsRef.current.audioFeedback) {
           playChime('stop_listen');
         }
-        return;
-      }
-
-      if (trialEntriesRef.current.length >= MAX_TRIAL_QUESTIONS) {
-        const msg =
-          'Your 10-question trial is complete. Tap Reset Trial to start a new 10-question test.';
-        setAssistantResponse(msg);
-        speakText(msg, settingsRef.current.speechRate);
         return;
       }
 
@@ -766,6 +714,7 @@ export default function App() {
     wakeWordEnabled: settings.wakeWordEnabled,
     onWakeWordEnabledChange: handleWakeWordEnabledChange,
     audioFeedback: settings.audioFeedback,
+    language: settings.language || 'en-IN',
     isProcessing,
     isSpeaking: isAudioSpeaking,
     onCommand: handleUserQuery,
@@ -785,13 +734,6 @@ export default function App() {
   );
 
   const handleTapToSpeak = useCallback(() => {
-    if (trialEntriesRef.current.length >= MAX_TRIAL_QUESTIONS) {
-      const msg =
-        'Your 10-question trial is complete. Tap Reset Trial to start a new 10-question test.';
-      setAssistantResponse(msg);
-      speakText(msg, settingsRef.current.speechRate);
-      return;
-    }
     if (voice.listenMode === 'command' || voice.listenMode === 'ptt') {
       voice.stopCommandWindow();
       return;
@@ -914,6 +856,21 @@ export default function App() {
             <span className="hidden xs:inline">{wearableBadge.label}</span>
             <span className="xs:hidden">{wearableBadge.label === 'No Hardware' ? 'No HW' : wearableBadge.label}</span>
           </span>
+
+          {/* English + Mother Tongue Language Selector */}
+          <select
+            aria-label="Spoken language"
+            title="Spoken language (English or mother tongue)"
+            value={settings.language || 'en-IN'}
+            onChange={(e) => updateSettings({ ...settings, language: e.target.value })}
+            className="min-h-[36px] rounded-lg border border-border bg-secondary px-2 py-1.5 text-xs font-bold text-foreground focus:border-primary focus:outline-none"
+          >
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <option key={lang.code} value={lang.code}>
+                {lang.label}
+              </option>
+            ))}
+          </select>
 
           {/* Quick Mute / Unmute Button */}
           <button
@@ -1063,7 +1020,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* Right Column: TAP TO SPEAK + 10-Question Trial */}
+        {/* Right Column: TAP TO SPEAK & Spoken Response */}
         <div className="lg:col-span-7 space-y-4">
               {/* Primary Voice Activation Section: ONE Big TAP TO SPEAK Button + Hey Sentra Wake Call */}
               <section className="rounded-2xl bg-card border border-border p-4 space-y-3.5">
@@ -1147,9 +1104,7 @@ export default function App() {
                     </span>
                   </div>
                   <span className="text-xs sm:text-sm font-semibold opacity-85">
-                    {trialEntries.length >= MAX_TRIAL_QUESTIONS
-                      ? '10-question trial complete — tap Reset Trial below'
-                      : settings.wakeWordEnabled
+                    {settings.wakeWordEnabled
                       ? 'Tap button or say "Hey Sentra" to activate'
                       : 'Activates only when you press this button or call "Hey Sentra"'}
                   </span>
@@ -1269,9 +1224,6 @@ export default function App() {
                   </button>
                 </div>
               )}
-
-              {/* 10-Question Trial & Supported Prompts Guide */}
-              <TrialTrackerCard entries={trialEntries} onResetTrial={handleResetTrial} />
 
               {/* Optional Typed Fallback (for devices where microphone speech recognition is unavailable) */}
               <div className="pt-1">

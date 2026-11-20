@@ -272,6 +272,7 @@ interface UseVoiceAssistantOptions {
   wakeWordEnabled: boolean;
   onWakeWordEnabledChange: (enabled: boolean) => void;
   audioFeedback: boolean;
+  language?: string;
   isProcessing: boolean;
   isSpeaking: boolean;
   onCommand: (commandText: string) => void | Promise<void>;
@@ -283,6 +284,7 @@ export function useVoiceAssistant({
   wakeWordEnabled,
   onWakeWordEnabledChange,
   audioFeedback,
+  language,
   isProcessing,
   isSpeaking,
   onCommand,
@@ -321,6 +323,8 @@ export function useVoiceAssistant({
   isSpeakingRef.current = isSpeaking;
   const audioFeedbackRef = useRef(audioFeedback);
   audioFeedbackRef.current = audioFeedback;
+  const languageRef = useRef(language);
+  languageRef.current = language;
 
   const onCommandRef = useRef(onCommand);
   onCommandRef.current = onCommand;
@@ -480,7 +484,7 @@ export function useVoiceAssistant({
       const mySessionId = sessionIdRef.current;
       try {
         const rec = new SpeechRecognitionClass();
-        rec.lang = navigator.language || 'en-US';
+        rec.lang = languageRef.current || navigator.language || 'en-US';
         rec.continuous = targetMode === 'wake' || targetMode === 'mic_test';
         rec.interimResults = true;
         rec.maxAlternatives = 1;
