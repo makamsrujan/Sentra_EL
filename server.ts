@@ -875,7 +875,6 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
             }
           : null,
       useWearableFrame: d.useWearableFrame,
-      language: d.language,
       store,
     });
 

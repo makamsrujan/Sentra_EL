@@ -340,7 +340,6 @@ export async function analyzeSentraObservation(
     heading: number | null;
     useWearableFrame: boolean;
     wearableDeviceId?: string;
-    language?: string;
   },
   signal?: AbortSignal
 ): Promise<AnalysisResponseData> {

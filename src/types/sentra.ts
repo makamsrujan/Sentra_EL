@@ -160,7 +160,6 @@ export interface SentraSettings {
   autoContinuousFind: boolean;
   continuousWatchMode: boolean;
   reachGuidanceEnabled: boolean;
-  language?: string;
 }
 
 export interface ReachGuidance {
