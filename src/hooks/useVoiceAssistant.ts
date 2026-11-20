@@ -275,7 +275,7 @@ interface UseVoiceAssistantOptions {
   isProcessing: boolean;
   isSpeaking: boolean;
   onCommand: (commandText: string) => void | Promise<void>;
-  onInterrupt: () => void;
+  onInterrupt: (interruptText?: string) => void;
   onUnsupportedFallback?: () => void;
 }
 
@@ -570,7 +570,7 @@ export function useVoiceAssistant({
               setLiveTranscript('');
               const wakeCheck = extractWakePhraseCommand(latestText);
               if (wakeCheck.isInterrupt) {
-                onInterruptRef.current();
+                onInterruptRef.current(wakeCheck.command || latestText);
               } else {
                 submitTranscriptOnce(
                   wakeCheck.detected && wakeCheck.command ? wakeCheck.command : latestText
@@ -587,7 +587,21 @@ export function useVoiceAssistant({
             cleanupRecognition();
             setMode('idle');
             setLiveTranscript('');
-            onInterruptRef.current();
+            onInterruptRef.current(parsed.command || latestText);
+            return;
+          }
+
+          // Allow short standalone "Repeat" / "Say that again" without requiring wake word
+          if (
+            !parsed.detected &&
+            latestSegmentFinal &&
+            /^(?:repeat|repeat that|say that again|say again)$/i.test(latestText.trim())
+          ) {
+            wakeOffsetRef.current = event.results.length;
+            cleanupRecognition();
+            setMode('idle');
+            setLiveTranscript('');
+            submitTranscriptOnce(latestText.trim());
             return;
           }
 

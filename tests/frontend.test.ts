@@ -6,10 +6,6 @@ import { clampBox2d } from '../server/validation';
 
 describe('SENTRA Frontend Perception Utilities & Bounding Box Geometry', () => {
   it('accurately projects normalized [0..1000] boxes under object-fit: cover cropping', () => {
-    // Container 400x400 (aspect 1.0), source 1600x800 (aspect 2.0, wider -> horizontal crop)
-    // Scale = 400 / 800 = 0.5; rendered width = 800, crop X = 200 each side
-    // Box [250, 400, 750, 600] -> source x in [640..960] -> scaled [320..480] -> minus 200 -> [120..280]
-    // Rendered inside 400x400 viewport -> x=120, y=100, width=160, height=200
     const box = computeObjectCoverBox([250, 400, 750, 600], 400, 400, 1600, 800);
     expect(box).not.toBeNull();
     expect(box!.x).toBeCloseTo(120, 1);
@@ -25,8 +21,45 @@ describe('SENTRA Frontend Perception Utilities & Bounding Box Geometry', () => {
 
   it('classifies voice queries into distinct operations accurately', () => {
     expect(parseVoiceIntent('What is my wearable battery level?').operation).toBe('device_status');
-    expect(parseVoiceIntent('Find my water bottle').operation).toBe('object_query');
-    expect(parseVoiceIntent('Find my water bottle').goal).toBe('water bottle');
+    expect(parseVoiceIntent('Find the water bottle')).toMatchObject({
+      mode: 'find',
+      operation: 'object_query',
+      goal: 'water bottle',
+    });
+
+    expect(parseVoiceIntent('Help me to walk near door')).toMatchObject({
+      mode: 'navigate',
+      operation: 'object_query',
+      goal: 'door',
+    });
+
+    expect(parseVoiceIntent('Help me finding obstacles')).toMatchObject({
+      mode: 'describe',
+      operation: 'scene_analysis',
+    });
+
+    // Real-world blind mobility survey scenarios
+    expect(parseVoiceIntent('Is anything hanging above my head?')).toMatchObject({
+      mode: 'describe',
+      operation: 'scene_analysis',
+    });
+    expect(parseVoiceIntent('Check the traffic signal before crossing the road')).toMatchObject({
+      mode: 'describe',
+      operation: 'scene_analysis',
+    });
+    expect(parseVoiceIntent('Which bus number is coming?')).toMatchObject({
+      mode: 'read',
+      operation: 'scene_analysis',
+    });
+    expect(parseVoiceIntent('What shop name is in front of me?')).toMatchObject({
+      mode: 'read',
+      operation: 'scene_analysis',
+    });
+    expect(parseVoiceIntent('What product is this and check the expiry')).toMatchObject({
+      mode: 'read',
+      operation: 'scene_analysis',
+    });
+
     expect(parseVoiceIntent('Describe what is in front of me').operation).toBe('scene_analysis');
     expect(parseVoiceIntent('Tell me a quick reminder about posture').operation).toBe('conversation');
   });
