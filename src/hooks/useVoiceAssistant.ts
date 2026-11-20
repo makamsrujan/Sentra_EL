@@ -887,6 +887,24 @@ export function useVoiceAssistant({
     return startSession('command');
   }, [flashWakeActivated, startSession]);
 
+  const stopCommandWindow = useCallback(() => {
+    if (listenModeRef.current !== 'command' && listenModeRef.current !== 'ptt') return;
+    const rec = recognitionRef.current;
+    if (audioFeedbackRef.current) {
+      playChime('stop_listen');
+    }
+    if (rec) {
+      try {
+        rec.stop();
+      } catch {
+        cleanupRecognition();
+        setMode('idle');
+      }
+    } else {
+      setMode('idle');
+    }
+  }, [cleanupRecognition, setMode]);
+
   const startMicTest = useCallback(async () => {
     onInterruptRef.current();
     setMicTestError(null);
@@ -1037,6 +1055,7 @@ export function useVoiceAssistant({
     startPushToTalk,
     stopPushToTalk,
     activateCommandWindow,
+    stopCommandWindow,
     startMicTest,
     stopMicTest,
   };

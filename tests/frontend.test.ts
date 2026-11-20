@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { computeObjectCoverBox } from '../src/services/cameraService';
-import { parseVoiceIntent } from '../src/utils/parser';
+import { classifyTrialCategory, parseVoiceIntent } from '../src/utils/parser';
 import { analyzeLocalScene } from '../src/utils/localVision';
 import { clampBox2d } from '../server/validation';
 
@@ -25,8 +25,26 @@ describe('SENTRA Frontend Perception Utilities & Bounding Box Geometry', () => {
 
   it('classifies voice queries into distinct operations accurately', () => {
     expect(parseVoiceIntent('What is my wearable battery level?').operation).toBe('device_status');
-    expect(parseVoiceIntent('Find my water bottle').operation).toBe('object_query');
-    expect(parseVoiceIntent('Find my water bottle').goal).toBe('water bottle');
+    expect(parseVoiceIntent('Find the water bottle')).toMatchObject({
+      mode: 'find',
+      operation: 'object_query',
+      goal: 'water bottle',
+    });
+    expect(classifyTrialCategory('Find the water bottle')).toBe('object_finder');
+
+    expect(parseVoiceIntent('Help me to walk near door')).toMatchObject({
+      mode: 'navigate',
+      operation: 'object_query',
+      goal: 'door',
+    });
+    expect(classifyTrialCategory('Help me to walk near door')).toBe('walk_assistant');
+
+    expect(parseVoiceIntent('Help me finding obstacles')).toMatchObject({
+      mode: 'describe',
+      operation: 'scene_analysis',
+    });
+    expect(classifyTrialCategory('Help me finding obstacles')).toBe('obstacles');
+
     expect(parseVoiceIntent('Describe what is in front of me').operation).toBe('scene_analysis');
     expect(parseVoiceIntent('Tell me a quick reminder about posture').operation).toBe('conversation');
   });
