@@ -340,44 +340,14 @@ export async function analyzeSentraObservation(
     heading: number | null;
     useWearableFrame: boolean;
     wearableDeviceId?: string;
-    language?: string;
   },
   signal?: AbortSignal
 ): Promise<AnalysisResponseData> {
-  const payload = JSON.stringify(body);
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const res = await fetch('/api/sentra/analyze', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      },
-      body: payload,
-      signal,
-    });
-
-    const contentType = res.headers.get('content-type') || '';
-    const rawText = await res.text();
-    const looksLikeHtml =
-      contentType.includes('text/html') || /^\s*<!doctype|^\s*<html/i.test(rawText);
-
-    if (looksLikeHtml || [502, 503, 504].includes(res.status)) {
-      if (attempt === 0 && !signal?.aborted) {
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      throw new Error(
-        'The Sentra server is waking up or temporarily unavailable. Wait a moment and try again.'
-      );
-    }
-
-    try {
-      return JSON.parse(rawText) as AnalysisResponseData;
-    } catch {
-      throw new Error(`Received an invalid response from Sentra server (HTTP ${res.status}).`);
-    }
-  }
-
-  throw new Error('The Sentra server did not return a valid response. Please try again.');
+  const res = await fetch('/api/sentra/analyze', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return res.json();
 }
