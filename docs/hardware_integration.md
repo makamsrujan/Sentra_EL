@@ -269,7 +269,121 @@ These pins are **already routed on the ESP32-CAM PCB**; do not wire them externa
 
 ---
 
-## 4. ESP32-S3 N16R8 Complete GPIO Allocation & Reserved Pins
+## 4. Breadboard Assembly Guide (Stationary Board vs. Mobile F-to-M Sensors)
+
+Because the **breadboard stays stationary** while the **GY-521 (MPU6050)** and **VL53L0X** move, organize the breadboard into clear stationary zones and terminate both moving sensors into a dedicated **I²C break-out hub** using **Female-to-Male (F-to-M)** jumper cables.
+
+### 4.1 Top-Down Breadboard Zoning Map
+
+> **Devkit Width Tip:** Many ESP32-S3 N16R8 devkits are wide enough to cover almost all rows of a single standard 830-point breadboard. Snap **two breadboards side-by-side** (remove one power rail between them) so the S3 straddles the seam with 3–4 open tie-points exposed on **both** sides.
+
+```text
+==========================================================================
+ TOP POWER RAIL (3.3V ONLY):   [+] 3.3V from ESP32-S3 3V3   [-] S3 GND
+==========================================================================
+
+  [ ZONE A: ESP32-S3 N16R8 ]      [ ZONE B: STATIONARY AUDIO & PTT ]
+  +------------------------+      +--------------+   +---------------+
+  | (USB-C facing left     |      |   INMP441    |   |   MAX98357A   |
+  |  edge for flashing)    |      | VDD->3.3V    |   | VIN->3.3V*    |
+  |                        |      | GND,L/R->GND |   | GND->GND      |
+  |  GPIO4  --+            |      | SCK<-GPIO14  |   | BCLK<-GPIO17  |
+  |  GPIO40 --+--+         |      | WS <-GPIO15  |   | LRC <-GPIO18  |
+  |  GPIO5  --+--+---+     |      | SD ->GPIO16  |   | DIN <-GPIO21  |
+  +-----------+--+---+-----+      +--------------+   | (+/-) OPEN**  |
+              |  |   |                               +---------------+
+              |  |   +---> [ PTT Button ] across center trench -> GND
+              |  |
+  [ ZONE C: I2C SENSOR HUB ]   (Front edge — easy plug-in for F-to-M leads)
+  Row X (SDA Hub): [GPIO4 jumper] [GY-521 SDA male] [VL53L0X SDA male] [ ]
+  Row Y (SCL Hub): [GPIO40 jumper][GY-521 SCL male] [VL53L0X SCL male] [ ]
+                                         |                 |
+                          (Strain-relief anchor at breadboard edge)
+                                         |                 |
+                        5-wire F-to-M    v                 v  4-wire F-to-M
+                        (20-30 cm)  [GY-521 MPU6050]  [VL53L0X Forward]
+                                     (Mobile / Free)   (Mobile / Free)
+
+==========================================================================
+ ISOLATED BOTTOM RAIL (5V ONLY — NEVER BRIDGE TO TOP 3.3V RAIL!):
+   [+] Dedicated 5V (>=1A)    [-] 5V Supply GND
+==========================================================================
+
+  [ ZONE D: SEPARATE ESP32-CAM (ESP-32S) — POWER ONLY ]
+  +--------------------------------------------------------------------+
+  | Seated on an isolated section (or separate mini breadboard)        |
+  | OV2640 ribbon stays plugged into ESP32-CAM and faces outward       |
+  | 5V  <--- Bottom 5V Rail   |  GND <--- Bottom GND Rail              |
+  | IO0 <--- Open in run mode |  ZERO data wires to ESP32-S3!          |
+  +--------------------------------------------------------------------+
+```
+
+---
+
+### 4.2 Stationary Breadboard Connections (Male-to-Male Jumpers)
+
+Assemble all stationary modules first **with all USB / power cables unplugged**:
+
+1. **Establish the `3.3V` and `GND` Rails (Top Rail Only):**
+   - Seat the **ESP32-S3 N16R8** with its USB-C port facing the outer edge of the breadboard so plugging/unplugging USB never flexes neighboring jumpers.
+   - Run one short Male-to-Male jumper from ESP32-S3 **`3V3`** to the top **`+` rail**, and one from ESP32-S3 **`GND`** to the top **`-` rail**.
+   - Keep this rail strictly `3.3V`. Do **not** connect any `5V` supply to it.
+
+2. **Seat and Wire the Stationary Audio Modules (`INMP441`, `MAX98357A`, PTT Button):**
+   - **INMP441 Microphone:** Press its 6-pin header straight into 6 adjacent breadboard columns. Leave the MEMS acoustic port hole unobstructed and place it away from the amplifier/speaker to avoid acoustic feedback.
+     - Wire short M-to-M jumpers: `VDD → 3.3V rail`, `GND → GND rail`, `L/R → GND rail`, `SCK → GPIO14`, `WS → GPIO15`, `SD → GPIO16`.
+   - **MAX98357A Amplifier:** Press its 7-pin header into 7 adjacent columns on the opposite end of the audio zone.
+     - Wire short M-to-M jumpers: `VIN → 3.3V rail` (initial safe lower power), `GND → GND rail`, `BCLK → GPIO17`, `LRC → GPIO18`, `DIN → GPIO21`.
+     - Leave `SD` floating (enabled) and leave `GAIN` floating (9 dB) or tied to `GND` via `100 kΩ` (3 dB).
+     - **Leave the speaker terminals (`+` / `-`) unconnected** until speaker impedance (Ω) and wattage (W) are confirmed.
+   - **Push-to-Talk (PTT) Button:** Straddle a momentary tactile push button across the breadboard center trench. Wire one leg to **`GPIO5`** and the diagonally opposite leg to the **`GND` rail**.
+
+3. **Create the Dedicated I²C Sensor Hub (Zone C):**
+   - Pick two adjacent unused rows near the edge of the breadboard where the mobile sensor cables will exit.
+   - Run one M-to-M jumper from ESP32-S3 **`GPIO4`** into the **SDA Hub row**, and one from **`GPIO40`** into the **SCL Hub row**.
+   - Keeping a dedicated hub row lets you plug/unplug the moving sensors cleanly without stressing the ESP32-S3 header pins.
+
+4. **Place and Power the Stationary ESP32-CAM (Zone D — Isolated):**
+   - Seat the **ESP32-CAM** on an isolated section (or its own mini breadboard) with the OV2640 ribbon kept firmly latched in its onboard connector and angled clear of wires.
+   - Feed **`5V` (≥ 1 A)** and **`GND`** strictly from an isolated `5V` rail or separate USB power supply (never from the S3 `3V3` pin).
+   - Confirm **zero** signal wires run between the ESP32-CAM and ESP32-S3, and confirm `IO0` is **not** grounded during normal operation.
+   - *(Tip: If you flash the ESP32-CAM with an ESP32-CAM-MB USB base, simply lift the ESP32-CAM off the breadboard, flash it on the MB base, then re-seat it into the `5V`/`GND` breadboard socket for run mode.)*
+
+---
+
+### 4.3 Mobile Sensor Connections (`GY-521 MPU6050` & `VL53L0X` via Female-to-Male Jumpers)
+
+All component headers have male pins, so using **Female-to-Male (F-to-M) ribbon jumper wires** lets both sensors move freely while staying reliably tied to the stationary breadboard:
+
+#### Harness 1 — Mobile `GY-521 (MPU6050)` (5-Wire F-to-M Bundle)
+1. Peel off a **5-wire strip** from a Female-to-Male Dupont ribbon (20–30 cm length; keep the wires joined together as a flat ribbon for durability).
+2. Press the **5 female sockets** squarely onto the GY-521 male header pins: `VCC`, `GND`, `SCL`, `SDA`, and `AD0` (skip `XDA`, `XCL`, `INT`).
+3. Plug the **5 male pins** into the stationary breadboard:
+   - `VCC` → **Top `3.3V` rail**
+   - `GND` → **Top `GND` rail**
+   - `AD0` → **Top `GND` rail** *(locks I²C address to `0x68`)*
+   - `SDA` → **SDA Hub row (`GPIO4`)**
+   - `SCL` → **SCL Hub row (`GPIO40`)**
+
+#### Harness 2 — Mobile `VL53L0X` Forward ToF (4-Wire F-to-M Bundle)
+1. Peel off a **4-wire strip** from a Female-to-Male Dupont ribbon (20–30 cm length).
+2. Press the **4 female sockets** squarely onto the VL53L0X male header pins: `VIN` (or `VCC`), `GND`, `SCL`, and `SDA` (leave `XSHUT` and `GPIO1` disconnected on a single breakout with a confirmed onboard pull-up).
+3. Plug the **4 male pins** into the stationary breadboard right beside the GY-521 connections:
+   - `VIN` → **Top `3.3V` rail**
+   - `GND` → **Top `GND` rail**
+   - `SDA` → **SDA Hub row (`GPIO4`)**
+   - `SCL` → **SCL Hub row (`GPIO40`)**
+
+#### Mechanical & Signal-Integrity Rules for Mobile F-to-M Harnesses
+- **Keep cable length ≤ 20–30 cm:** Do not chain multiple jumper cables end-to-end; extra length increases bus capacitance and introduces intermittent connections during movement.
+- **Add strain relief at the breadboard edge:** Tape or zip-tie both F-to-M ribbons gently to the edge of the breadboard (or enclosure) with a small service loop so moving the sensors pulls against the anchor instead of pulling male pins out of the breadboard sockets.
+- **Check pin tightness on the moving ends:** If any female Dupont housing slides loosely on the GY-521 or VL53L0X header pins, replace that jumper before powering up — intermittent I²C `SDA`/`SCL` contact during motion will cause sensor timeouts (`absent`/`expired` readings).
+- **Orientation & optical clearance:** Point the VL53L0X emitter/receiver window straight forward with no tape or wires crossing its field of view, and mount the GY-521 flat against your moving mount while noting its silkscreen `X`/`Y`/`Z` axis arrows.
+- **Pre-power check:** Before plugging in USB, verify `3.3V` and `GND` are not shorted, confirm `5V` is isolated from the `3.3V` rail, and gently wiggle both mobile harnesses to verify every male pin stays firmly seated in the breadboard.
+
+---
+
+## 5. ESP32-S3 N16R8 Complete GPIO Allocation & Reserved Pins
 
 ### Used GPIOs (Verified Conflict-Free by Compile-Time `#error` Guards)
 
@@ -297,7 +411,7 @@ Enforced by `SENTRA_PIN_IS_N16R8_RESERVED(p)` in `firmware/esp32s3/include/board
 
 ---
 
-## 5. Firmware Build Profiles & Backend Pairing Compatibility
+## 6. Firmware Build Profiles & Backend Pairing Compatibility
 
 | Stage | Firmware Project | Build Overlay (`SDKCONFIG_DEFAULTS`) | Active Hardware |
 | --- | --- | --- | --- |
@@ -317,7 +431,7 @@ SENTRA_LIVE_MODEL="gemini-3.8-live"
 
 ---
 
-## 6. Safe 4-Stage Bring-Up Checklist
+## 7. Safe 4-Stage Bring-Up Checklist
 
 1. **Stage 1 — S3 + Tethered I²C Sensors Only:** Wire only `3.3V`, `GND`, `GY-521`, and `VL53L0X`. Flash `firmware/esp32s3` with `sdkconfig.defaults`. Confirm boot I²C scan detects **`0x29`** and **`0x68`**, then verify stationary `[BENCH]` distance (measured with a ruler) and IMU tilt changes.
 2. **Stage 2 — Separate ESP32-CAM:** Flash `firmware/esp32cam` separately. Run the local serial JPEG capture test first, then verify authenticated frame uploads to `POST /api/device/frame` and backend pairing via `SENTRA_CAMERA_PAIRINGS`.
