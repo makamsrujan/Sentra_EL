@@ -1,0 +1,28 @@
+{
+  "folders": [
+    {
+      "name": "SENTRA - App and Backend",
+      "path": "."
+    },
+    {
+      "name": "ESP32-S3 Firmware",
+      "path": "firmware/esp32s3"
+    },
+    {
+      "name": "ESP32-CAM Firmware",
+      "path": "firmware/esp32cam"
+    }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/.DS_Store": true,
+      "**/node_modules": true,
+      "**/build": true
+    },
+    "search.exclude": {
+      "**/node_modules": true,
+      "**/build": true,
+      "**/dist": true
+    }
+  }
+}
