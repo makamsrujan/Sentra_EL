@@ -69,6 +69,7 @@ export const TelemetryPayloadV1Schema = z.object({
   uptimeMs: z.number().finite().min(0).max(365 * 24 * 3600 * 1000),
   firmwareVersion: z.string().trim().max(48).nullable().optional(),
   batteryPercent: finiteNullableNumber(0, 100),
+  batteryVoltageV: finiteNullableNumber(0, 25),
   batteryCharging: z.boolean().nullable().optional(),
   earphoneConnected: z.boolean().nullable().optional(),
   audioVolume: finiteNullableNumber(0, 100),
@@ -97,6 +98,7 @@ export const LegacyTelemetrySchema = z.object({
   sequence: z.number().int().min(0).optional(),
   uptimeMs: z.number().finite().min(0).optional(),
   batteryLevel: finiteNullableNumber(0, 100),
+  batteryVoltageV: finiteNullableNumber(0, 25),
   batteryCharging: z.boolean().nullable().optional(),
   forwardToFDistanceCm: finiteNullableNumber(0, 1000),
   downwardCliffSensorMm: finiteNullableNumber(0, 5000),
@@ -138,6 +140,16 @@ function sanitizeDistanceReading(val: number | null | undefined, minValid: numbe
   return val;
 }
 
+/**
+ * Normalizes zero/unwired ADC battery readings (<0.5V or >20V) to null so a
+ * floating or grounded ADC pin is never displayed as a valid battery voltage.
+ */
+function sanitizeBatteryVoltage(val: number | null | undefined): number | null {
+  if (val === null || val === undefined || !Number.isFinite(val)) return null;
+  if (val < 0.5 || val > 20) return null;
+  return Number(val.toFixed(2));
+}
+
 export function parseAndAdaptTelemetry(
   rawBody: unknown,
   fallbackSequence = 0,
@@ -177,6 +189,7 @@ export function parseAndAdaptTelemetry(
         uptimeMs: d.uptimeMs,
         firmwareVersion: d.firmwareVersion ?? null,
         batteryPercent: d.batteryPercent ?? null,
+        batteryVoltageV: sanitizeBatteryVoltage(d.batteryVoltageV),
         batteryCharging: d.batteryCharging ?? null,
         earphoneConnected: d.capabilities.audioOutput ? (d.earphoneConnected ?? null) : null,
         audioVolume: d.capabilities.audioOutput ? (d.audioVolume ?? null) : null,
@@ -218,6 +231,7 @@ export function parseAndAdaptTelemetry(
       uptimeMs: l.uptimeMs ?? 0,
       firmwareVersion: null,
       batteryPercent: l.batteryLevel ?? null,
+      batteryVoltageV: sanitizeBatteryVoltage(l.batteryVoltageV),
       batteryCharging: l.batteryCharging ?? null,
       earphoneConnected: l.earphoneConnected ?? null,
       audioVolume: l.audioVolume ?? null,

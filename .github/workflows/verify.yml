@@ -33,6 +33,7 @@ jobs:
             firmware/esp32s3/src/obstacle_awareness.c \
             firmware/esp32s3/src/local_alerts.c \
             firmware/esp32s3/src/i2s_audio.c \
+            firmware/esp32s3/src/battery_adc.c \
             firmware/esp32s3/src/device_telemetry.c \
             -lm -o /tmp/sentra_fw_test && /tmp/sentra_fw_test
           gcc -Wall -Wextra -Werror -DSENTRA_FIRMWARE_HOST_TEST \
@@ -46,6 +47,7 @@ jobs:
             firmware/esp32s3/src/obstacle_awareness.c \
             firmware/esp32s3/src/local_alerts.c \
             firmware/esp32s3/src/i2s_audio.c \
+            firmware/esp32s3/src/battery_adc.c \
             firmware/esp32s3/src/device_telemetry.c \
             -lm -o /tmp/sentra_fw_audio_test && /tmp/sentra_fw_audio_test
           gcc -Wall -Wextra -Werror \

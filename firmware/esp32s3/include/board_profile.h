@@ -177,6 +177,20 @@ extern "C" {
 #endif
 #define BOARD_PIN_STATUS_LED            -1
 
+/* Battery Voltage ADC1 Pin (Wi-Fi safe: GPIO 1..10; default GPIO 6 = ADC1_CH5) */
+/* Requires external resistor voltage divider so pin input never exceeds 3.3V.  */
+#ifdef CONFIG_SENTRA_PIN_BATTERY_ADC
+#define BOARD_PIN_BATTERY_ADC           CONFIG_SENTRA_PIN_BATTERY_ADC
+#else
+#define BOARD_PIN_BATTERY_ADC           6
+#endif
+
+#ifdef CONFIG_SENTRA_BATTERY_ADC_SCALE_MILLI
+#define BOARD_BATTERY_ADC_SCALE_MILLI   CONFIG_SENTRA_BATTERY_ADC_SCALE_MILLI
+#else
+#define BOARD_BATTERY_ADC_SCALE_MILLI   2000
+#endif
+
 /* ========================================================================= */
 /* 6. RESERVED ESP32-S3 N16R8 PINS & COMPILE-TIME CONFLICT GUARDS            */
 /* ========================================================================= */
@@ -209,6 +223,24 @@ extern "C" {
 #error "Action button cannot use reserved ESP32-S3 N16R8 pins."
 #endif
 
+#if BOARD_PIN_BATTERY_ADC < 1 || BOARD_PIN_BATTERY_ADC > 10
+#error "BOARD_PIN_BATTERY_ADC must be an ESP32-S3 ADC1 pin (GPIO 1..10); ADC2 conflicts with Wi-Fi."
+#endif
+
+#if SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_BATTERY_ADC)
+#error "BOARD_PIN_BATTERY_ADC cannot use a reserved ESP32-S3 N16R8 strapping/Flash/PSRAM pin."
+#endif
+
+#if BOARD_PIN_BATTERY_ADC == BOARD_PIN_I2C_SDA || BOARD_PIN_BATTERY_ADC == BOARD_PIN_I2C_SCL || \
+    (BOARD_PIN_PTT_BUTTON >= 0 && BOARD_PIN_BATTERY_ADC == BOARD_PIN_PTT_BUTTON)
+#error "BOARD_PIN_BATTERY_ADC cannot conflict with I2C SDA/SCL or PTT button GPIO."
+#endif
+
+#if defined(CONFIG_SENTRA_ENABLE_BATTERY_ADC) && defined(CONFIG_SENTRA_ENABLE_CAMERA) && \
+    BOARD_PIN_BATTERY_ADC == BOARD_PIN_CAM_VSYNC
+#error "BOARD_PIN_BATTERY_ADC overlaps legacy S3 DVP VSYNC; change battery ADC pin or disable legacy camera."
+#endif
+
 #ifdef CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE
 #if defined(CONFIG_SENTRA_ENABLE_WM8960)
 #error "Cannot enable both discrete INMP441/MAX98357A audio and legacy WM8960."
@@ -238,6 +270,11 @@ extern "C" {
     BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_BCLK || BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_LRC || \
     BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_DIN
 #error "INMP441 and MAX98357A GPIOs must be distinct."
+#endif
+#if BOARD_PIN_BATTERY_ADC == BOARD_PIN_INMP441_SCK || BOARD_PIN_BATTERY_ADC == BOARD_PIN_INMP441_WS || \
+    BOARD_PIN_BATTERY_ADC == BOARD_PIN_INMP441_SD  || BOARD_PIN_BATTERY_ADC == BOARD_PIN_MAX98357A_BCLK || \
+    BOARD_PIN_BATTERY_ADC == BOARD_PIN_MAX98357A_LRC || BOARD_PIN_BATTERY_ADC == BOARD_PIN_MAX98357A_DIN
+#error "BOARD_PIN_BATTERY_ADC cannot conflict with INMP441/MAX98357A GPIOs."
 #endif
 #endif
 

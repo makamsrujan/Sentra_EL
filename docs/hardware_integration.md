@@ -220,6 +220,24 @@ ESP32-S3 N16R8                      Momentary Tactile Button
 
 ---
 
+### 3.5a Battery Voltage Monitor (`ADC1_CH5` on `GPIO6` — Stationary Breadboard Voltage Divider)
+
+> **CRITICAL PIN VOLTAGE WARNING:** ESP32-S3 GPIOs are rated for **`3.3V` maximum**. **NEVER** wire a raw 1S LiPo (`3.0–4.2V`) or `5V` USB rail directly to `GPIO6`. Always use an external resistor voltage divider (e.g., two `100 kΩ` resistors = `2:1` ratio) so the voltage at `GPIO6` stays safely below `3.3V`.
+
+```text
+  VBAT (+) ---[ R1 = 100 kOhm ]---+---[ R2 = 100 kOhm ]---> GND (Rail)
+                                  |
+                                  +---> ESP32-S3 GPIO6 (ADC1_CH5, Wi-Fi safe)
+                                        (Optional 100 nF cap from GPIO6 to GND for noise filtering)
+```
+
+| Node | ESP32-S3 / Breadboard | Firmware Symbol | Notes |
+| --- | --- | --- | --- |
+| **Divider Midpoint** | ESP32-S3 **`GPIO6`** (`ADC1_CH5`) | `CONFIG_SENTRA_ENABLE_BATTERY_ADC=y`, `CONFIG_SENTRA_PIN_BATTERY_ADC=6` | Wi-Fi safe ADC1 pin; unwired/grounded pin (`< 0.25V`) reports `batteryVoltageV: null` |
+| **Divider Scale** | `R1 = 100 kΩ`, `R2 = 100 kΩ` (`2.0×`) | `CONFIG_SENTRA_BATTERY_ADC_SCALE_MILLI=2000` | Adjust to `round(((R1 + R2) / R2) * 1000)` in `menuconfig` if using different resistor values |
+
+---
+
 ### 3.6 Separate Board — ESP32-CAM (`ESP-32S`, AI-Thinker Candidate Profile)
 
 Keep the OV2640 ribbon strictly on the ESP32-CAM board. **No GPIO wires connect between the ESP32-CAM and the ESP32-S3.**
@@ -413,6 +431,7 @@ All ESP32-S3 GPIO assignments below are validated against reserved N16R8 pins an
 | **MAX98357A Amp** | `SD` / `GAIN` | Floating (`GAIN`: optional `100 kΩ` to `GND`) | Amp control | — | None / 100 kΩ | Do not ground `SD` |
 | **Speaker (Unverified)** | `+` / `-` | MAX98357A `+` / `-` | Bridged Class-D | — | **Disconnected until verified** | Verify Ω & W first; never ground leads |
 | **PTT Tactile Button** | Pin A / Pin B | **ESP32-S3 `GPIO5`** / `GND` rail | Active-low GPIO | `CONFIG_SENTRA_PIN_ACTION_BUTTON=5` | M-to-M (breadboard) | Internal pull-up; press triggers 3.5 s capture (`X-Audio-Trigger: ptt`) |
+| **Battery Voltage Divider** | Divider midpoint | **ESP32-S3 `GPIO6`** (`ADC1_CH5`) | `ADC1` (Wi-Fi safe) | `CONFIG_SENTRA_PIN_BATTERY_ADC=6` / `SCALE_MILLI=2000` | Breadboard `100 kΩ / 100 kΩ` | **Never exceed `3.3V` at `GPIO6`**; reports `batteryVoltageV` (`null` if unwired) |
 | **ESP32-CAM (Run Mode)** | `5V` / `GND` | Dedicated `5V` (≥ 1 A) / `GND` | Wi-Fi HTTP (`esp32`) | `firmware/esp32cam` | Power only (**0 wires to S3**) | Pairs with S3 in backend via `SENTRA_CAMERA_PAIRINGS` |
 | **ESP32-CAM (Flash Mode)** | `U0R` / `U0T` / `IO0` | USB-UART `TX` / `RX` / temp `GND` | UART0 Flash | `GPIO3` / `GPIO1` / `GPIO0` | Flash cable only | Remove `IO0 ↔ GND` after flashing & press `RST` |
 

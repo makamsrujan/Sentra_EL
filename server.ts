@@ -726,6 +726,10 @@ export function createSentraApp(options?: {
           : req.body?.batteryLevel !== undefined
           ? req.body.batteryLevel
           : current?.batteryPercent ?? 82,
+      batteryVoltageV:
+        req.body?.batteryVoltageV !== undefined
+          ? req.body.batteryVoltageV
+          : current?.batteryVoltageV ?? null,
       batteryCharging: req.body?.batteryCharging ?? false,
       earphoneConnected: req.body?.earphoneConnected ?? false,
       audioVolume: req.body?.audioVolume ?? 80,

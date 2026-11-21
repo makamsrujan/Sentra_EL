@@ -26,6 +26,7 @@ function makeBaseDevice(overrides: Partial<DeviceLiveState> = {}): DeviceLiveSta
     frameStale: false,
     frameFormat: 'image/jpeg',
     batteryPercent: null,
+    batteryVoltageV: null,
     batteryCharging: null,
     earphoneConnected: false,
     audioVolume: null,

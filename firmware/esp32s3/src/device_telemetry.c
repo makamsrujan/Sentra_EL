@@ -82,13 +82,23 @@ int sentra_telemetry_build_json(const sentra_telemetry_snapshot_t *snap, char *o
         snprintf(imu_obj_str, sizeof(imu_obj_str), "null");
     }
 
+    char batt_v_str[24];
+    if (snap->battery_voltage_valid &&
+        isfinite(snap->battery_voltage_v) &&
+        snap->battery_voltage_v >= 0.5f &&
+        snap->battery_voltage_v <= 20.0f) {
+        snprintf(batt_v_str, sizeof(batt_v_str), "%.2f", (double)snap->battery_voltage_v);
+    } else {
+        snprintf(batt_v_str, sizeof(batt_v_str), "null");
+    }
+
     const char *imu_status = !snap->imu_ready ? "unavailable" : (snap->imu_valid ? "valid" : "invalid");
 
     int written = snprintf(
         out_buf,
         out_buf_size,
         "{\"schemaVersion\":1,\"deviceId\":\"%s\",\"sequence\":%u,\"uptimeMs\":%lld,"
-        "\"firmwareVersion\":\"%s\",\"batteryPercent\":null,\"batteryCharging\":null,"
+        "\"firmwareVersion\":\"%s\",\"batteryPercent\":null,\"batteryVoltageV\":%s,\"batteryCharging\":null,"
         "\"earphoneConnected\":null,\"audioVolume\":null,"
         "\"sensors\":{\"forwardDistanceCm\":%s,\"downwardDistanceMm\":null,"
         "\"headPitchDeg\":%s,\"imu\":%s,\"vl53l5cx\":null},"
@@ -101,6 +111,7 @@ int sentra_telemetry_build_json(const sentra_telemetry_snapshot_t *snap, char *o
         (unsigned)snap->sequence,
         (long long)snap->uptime_ms,
         esc_fw_ver,
+        batt_v_str,
         fwd_dist_str,
         pitch_str,
         imu_obj_str,
@@ -129,6 +140,7 @@ int sentra_telemetry_build_json(const sentra_telemetry_snapshot_t *snap, char *o
 #include "wifi_transport.h"
 #include "mpu6050.h"
 #include "vl53l5cx_optional.h"
+#include "battery_adc.h"
 #include "esp_http_client.h"
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include "esp_crt_bundle.h"
@@ -147,6 +159,7 @@ static bool s_forward_tof_ready = false;
 static bool s_wm8960_ready = false;
 static bool s_audio_output_ready = false;
 static bool s_vl53l5cx_ready = false;
+static bool s_battery_adc_ready = false;
 static vl53l0x_reading_t s_latest_tof = {0};
 static int64_t s_latest_tof_ms = 0;
 static sentra_obstacle_level_t s_obstacle_level = SENTRA_OBSTACLE_UNKNOWN;
@@ -184,6 +197,9 @@ void sentra_telemetry_set_audio_output_initialized(bool value) {
 void sentra_telemetry_set_vl53l5cx_initialized(bool value) {
     lock_state(); s_vl53l5cx_ready = value; unlock_state();
 }
+void sentra_telemetry_set_battery_adc_initialized(bool value) {
+    lock_state(); s_battery_adc_ready = value; unlock_state();
+}
 
 void sentra_telemetry_update_forward_tof(const vl53l0x_reading_t *reading, sentra_obstacle_level_t obstacle_level) {
     lock_state();
@@ -205,6 +221,8 @@ static esp_err_t post_telemetry(void) {
     int64_t now_ms = esp_timer_get_time() / 1000;
     sentra_telemetry_snapshot_t snap = {0};
 
+    bool battery_adc_ready = false;
+
     lock_state();
     snap.device_id = cfg.device_id;
     snap.firmware_version = SENTRA_FIRMWARE_VERSION;
@@ -216,6 +234,7 @@ static esp_err_t post_telemetry(void) {
     snap.wm8960_ready = s_wm8960_ready;
     snap.audio_output_ready = s_audio_output_ready;
     snap.vl53l5cx_ready = s_vl53l5cx_ready;
+    battery_adc_ready = s_battery_adc_ready;
     snap.tof_fresh = s_latest_tof_ms > 0 && ((now_ms - s_latest_tof_ms) <= 5000);
     snap.forward_reading = s_latest_tof;
     snap.obstacle_level = s_obstacle_level;
@@ -225,6 +244,14 @@ static esp_err_t post_telemetry(void) {
         snap.imu_valid = (sentra_mpu6050_read(I2C_NUM_0, &snap.imu_sample) == ESP_OK && snap.imu_sample.valid);
     }
     snap.imu_calibrated = sentra_mpu6050_is_calibrated();
+
+    if (battery_adc_ready && sentra_battery_adc_is_ready()) {
+        sentra_battery_reading_t batt = {0};
+        if (sentra_battery_adc_read(&batt) == ESP_OK && batt.valid) {
+            snap.battery_voltage_valid = true;
+            snap.battery_voltage_v = batt.voltage_v;
+        }
+    }
 
     char json_buf[1280];
     int json_len = sentra_telemetry_build_json(&snap, json_buf, sizeof(json_buf));

@@ -114,6 +114,7 @@ export interface TelemetryPayloadV1 {
   uptimeMs: number;
   firmwareVersion?: string | null;
   batteryPercent: number | null;
+  batteryVoltageV?: number | null;
   batteryCharging?: boolean | null;
   earphoneConnected?: boolean | null;
   audioVolume?: number | null;
@@ -161,6 +162,7 @@ export interface DeviceLiveState {
   lastSequence: number | null;
   uptimeMs: number | null;
   batteryPercent: number | null;
+  batteryVoltageV: number | null;
   batteryCharging: boolean | null;
   earphoneConnected: boolean | null;
   audioVolume: number | null;

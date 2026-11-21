@@ -685,4 +685,73 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
     expect(statusJson.deviceConfig.proximityCriticalCm).toBe(55);
     expect(statusJson.sensorFusion).toBeTruthy();
   });
+
+  it('exposes validated batteryVoltageV in /api/device/telemetry and /api/device/status, normalizes 0V to null, and rejects out-of-range values', async () => {
+    const validRes = await fetch(`${baseUrl}/api/device/telemetry`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${provisionedToken}`,
+      },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        deviceId,
+        sequence: 101,
+        uptimeMs: 9200,
+        batteryPercent: null,
+        batteryVoltageV: 3.94,
+        sensors: { forwardDistanceCm: 140, downwardDistanceMm: 85, imu: null },
+        capabilities: { camera: true, forwardToF: true, downwardToF: true, imu: false, audioOutput: true },
+      }),
+    });
+    expect(validRes.status).toBe(200);
+    const validBody = await validRes.json();
+    expect(validBody.state.batteryVoltageV).toBeCloseTo(3.94, 2);
+
+    const statusRes = await fetch(`${baseUrl}/api/device/status?deviceId=${deviceId}`);
+    const statusJson = await statusRes.json();
+    expect(statusJson.telemetry.batteryVoltageV).toBeCloseTo(3.94, 2);
+
+    // Grounded/unwired ADC reading (0V) is normalized to null
+    const zeroRes = await fetch(`${baseUrl}/api/device/telemetry`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${provisionedToken}`,
+      },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        deviceId,
+        sequence: 102,
+        uptimeMs: 9400,
+        batteryPercent: null,
+        batteryVoltageV: 0,
+        sensors: { forwardDistanceCm: 140, downwardDistanceMm: 85, imu: null },
+        capabilities: { camera: true, forwardToF: true, downwardToF: true, imu: false, audioOutput: true },
+      }),
+    });
+    expect(zeroRes.status).toBe(200);
+    const zeroBody = await zeroRes.json();
+    expect(zeroBody.state.batteryVoltageV).toBeNull();
+
+    // Out-of-range voltage is rejected with 400
+    const badRes = await fetch(`${baseUrl}/api/device/telemetry`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${provisionedToken}`,
+      },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        deviceId,
+        sequence: 103,
+        uptimeMs: 9600,
+        batteryPercent: null,
+        batteryVoltageV: 30,
+        sensors: { forwardDistanceCm: 140, downwardDistanceMm: 85, imu: null },
+        capabilities: { camera: true, forwardToF: true, downwardToF: true, imu: false, audioOutput: true },
+      }),
+    });
+    expect(badRes.status).toBe(400);
+  });
 });

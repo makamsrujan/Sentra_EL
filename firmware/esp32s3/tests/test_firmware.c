@@ -29,6 +29,7 @@
 #include "local_alerts.h"
 #include "board_profile.h"
 #include "i2s_audio.h"
+#include "battery_adc.h"
 #include "device_telemetry.h"
 
 /* ========================================================================= */
@@ -408,9 +409,12 @@ static void test_12_telemetry_serialization_missing_and_valid(int dump_json) {
         .imu_valid = imu.valid,
         .imu_calibrated = true,
         .imu_sample = imu,
+        .battery_voltage_valid = true,
+        .battery_voltage_v = 3.92f,
     };
     assert(sentra_telemetry_build_json(&valid_snap, buf_valid, sizeof(buf_valid)) > 0);
     assert(strstr(buf_valid, "\"forwardDistanceCm\":42.5") != NULL);
+    assert(strstr(buf_valid, "\"batteryVoltageV\":3.92") != NULL);
     assert(strstr(buf_valid, "\"forwardToF\":\"valid\"") != NULL);
     assert(strstr(buf_valid, "\"forwardToF\":true") != NULL);
 
@@ -429,9 +433,12 @@ static void test_12_telemetry_serialization_missing_and_valid(int dump_json) {
         .obstacle_level = SENTRA_OBSTACLE_UNKNOWN,
         .imu_valid = false,
         .imu_calibrated = false,
+        .battery_voltage_valid = false,
+        .battery_voltage_v = 0.0f,
     };
     assert(sentra_telemetry_build_json(&missing_snap, buf_missing, sizeof(buf_missing)) > 0);
     assert(strstr(buf_missing, "\"forwardDistanceCm\":null") != NULL);
+    assert(strstr(buf_missing, "\"batteryVoltageV\":null") != NULL);
     assert(strstr(buf_missing, "\"imu\":null") != NULL);
     assert(strstr(buf_missing, "\"headPitchDeg\":null") != NULL);
     assert(strstr(buf_missing, "\"forwardToF\":false") != NULL);
@@ -490,6 +497,52 @@ static void test_13_discrete_audio_i2s_and_pin_profile(void) {
     assert(strstr(buf, "\"camera\":false") != NULL);
 }
 
+static void test_14_battery_adc_voltage_reader(void) {
+    /* Default ADC1 GPIO6 (ADC1_CH5) and 2:1 voltage divider scale */
+    assert(BOARD_PIN_BATTERY_ADC == 6);
+    assert(BOARD_BATTERY_ADC_SCALE_MILLI == 2000);
+
+    /* Valid ESP32-S3 ADC1 GPIOs (1..10 -> CH0..CH9); ADC2 (>=11) rejected */
+    assert(sentra_battery_adc_gpio_to_channel(1) == 0);
+    assert(sentra_battery_adc_gpio_to_channel(6) == 5);
+    assert(sentra_battery_adc_gpio_to_channel(10) == 9);
+    assert(sentra_battery_adc_gpio_to_channel(0) == -1);
+    assert(sentra_battery_adc_gpio_to_channel(-1) == -1);
+    assert(sentra_battery_adc_gpio_to_channel(11) == -1);
+    assert(sentra_battery_adc_gpio_to_channel(15) == -1);
+    assert(sentra_battery_adc_gpio_to_channel(40) == -1);
+
+    /* Fallback raw-to-mV linear scaling */
+    int mid_mv = sentra_battery_adc_raw_to_mv(2048, 4095, 3100);
+    assert(mid_mv >= 1549 && mid_mv <= 1551);
+    assert(sentra_battery_adc_raw_to_mv(0, 4095, 3100) == 0);
+
+    /* Valid 1S LiPo reading through 100k/100k (2:1) divider: 1960 mV pin -> 3.92 V */
+    sentra_battery_reading_t r = {0};
+    assert(sentra_battery_adc_mv_to_voltage(2589, 1960, 2000U, &r) == true);
+    assert(r.valid == true);
+    assert(r.pin_mv == 1960);
+    assert(fabsf(r.voltage_v - 3.92f) < 0.01f);
+
+    /* Valid 5V USB rail through 100k/100k (2:1) divider: 2480 mV pin -> 4.96 V */
+    assert(sentra_battery_adc_mv_to_voltage(3276, 2480, 2000U, &r) == true);
+    assert(r.valid == true);
+    assert(fabsf(r.voltage_v - 4.96f) < 0.01f);
+
+    /* Grounded / unwired pin (< 250 mV) must fail closed (valid=false -> null) */
+    assert(sentra_battery_adc_mv_to_voltage(50, 40, 2000U, &r) == false);
+    assert(r.valid == false);
+    assert(r.voltage_v == 0.0f);
+
+    /* Over-voltage pin (> 3350 mV) or invalid divider scale fails closed */
+    assert(sentra_battery_adc_mv_to_voltage(4095, 3500, 2000U, &r) == false);
+    assert(r.valid == false);
+    assert(sentra_battery_adc_mv_to_voltage(2000, 1800, 500U, &r) == false);
+    assert(r.valid == false);
+    assert(sentra_battery_adc_mv_to_voltage(2000, 1800, 12000U, &r) == false);
+    assert(r.valid == false);
+}
+
 int main(int argc, char **argv) {
     int dump_json = (argc > 1 && strcmp(argv[1], "--dump-json") == 0);
 
@@ -506,9 +559,10 @@ int main(int argc, char **argv) {
     test_11_wifi_disconnection();
     test_12_telemetry_serialization_missing_and_valid(dump_json);
     test_13_discrete_audio_i2s_and_pin_profile();
+    test_14_battery_adc_voltage_reader();
 
     if (!dump_json) {
-        printf("PASS: all 13 ESP32-S3 firmware pre-hardware unit tests passed.\n");
+        printf("PASS: all 14 ESP32-S3 firmware pre-hardware unit tests passed.\n");
     }
     return 0;
 }

@@ -13,8 +13,9 @@ idf_component_register(
         "../src/obstacle_awareness.c"
         "../src/wifi_transport.c"
         "../src/camera_driver.c"
+        "../src/battery_adc.c"
         "../src/device_telemetry.c"
     INCLUDE_DIRS "../include"
-    REQUIRES driver esp_http_client json nvs_flash mbedtls
+    REQUIRES driver esp_adc esp_http_client json nvs_flash mbedtls
              esp_wifi esp_event esp_netif esp_timer esp_psram esp32-camera
 )

@@ -37,6 +37,7 @@
 #include "audio_http.h"
 #include "wifi_transport.h"
 #include "camera_driver.h"
+#include "battery_adc.h"
 #include "device_telemetry.h"
 
 static const char *TAG = "SENTRA_MAIN";
@@ -49,6 +50,7 @@ static volatile bool s_imu_ready = false;
 static volatile bool s_wm8960_ready = false;
 static volatile bool s_mic_ready = false;
 static volatile bool s_speaker_ready = false;
+static volatile bool s_battery_adc_ready = false;
 
 const char* sentra_audio_state_to_string(sentra_audio_state_t state) {
     switch (state) {
@@ -286,13 +288,23 @@ static void sensor_safety_task(void *pvParameters) {
                 snprintf(tof_str, sizeof(tof_str), "UNAVAILABLE (%s)", vl53l0x_status_to_string(reading.status));
             }
 
+            char batt_str[32];
+            sentra_battery_reading_t batt_reading = {0};
+            if (s_battery_adc_ready && sentra_battery_adc_read(&batt_reading) == ESP_OK && batt_reading.valid) {
+                snprintf(batt_str, sizeof(batt_str), "%.2f V (pin %d mV)",
+                         (double)batt_reading.voltage_v, batt_reading.pin_mv);
+            } else {
+                snprintf(batt_str, sizeof(batt_str), "UNAVAILABLE");
+            }
+
             if (imu_ok) {
-                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg roll=%.1f deg motion=%.2f cal=%s",
+                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg roll=%.1f deg motion=%.2f cal=%s | Batt: %s",
                          tof_str, (double)imu_sample.pitch_deg, (double)imu_sample.roll_deg,
                          (double)imu_sample.motion_magnitude,
-                         sentra_mpu6050_is_calibrated() ? "yes" : "no");
+                         sentra_mpu6050_is_calibrated() ? "yes" : "no",
+                         batt_str);
             } else {
-                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: UNAVAILABLE", tof_str);
+                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: UNAVAILABLE | Batt: %s", tof_str, batt_str);
             }
         }
 
@@ -383,6 +395,18 @@ void app_main(void) {
     sentra_telemetry_set_forward_tof_initialized(s_forward_tof_ready);
     sentra_telemetry_set_vl53l5cx_initialized(vl53l5cx_optional_init(I2C_NUM_0) == ESP_OK);
 
+#ifdef CONFIG_SENTRA_ENABLE_BATTERY_ADC
+    {
+        esp_err_t batt_status = sentra_battery_adc_init(SENTRA_PIN_BATTERY_ADC, SENTRA_BATTERY_ADC_SCALE_MILLI);
+        s_battery_adc_ready = (batt_status == ESP_OK);
+        if (!s_battery_adc_ready) {
+            ESP_LOGW(TAG, "Battery ADC (GPIO%d) unavailable: %s",
+                     SENTRA_PIN_BATTERY_ADC, esp_err_to_name(batt_status));
+        }
+    }
+#endif
+    sentra_telemetry_set_battery_adc_initialized(s_battery_adc_ready);
+
 #ifdef CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE
     ESP_LOGI(TAG, "Separate discrete I2S audio profile enabled (no WM8960).");
 #ifdef CONFIG_SENTRA_ENABLE_INMP441_MIC
@@ -446,9 +470,10 @@ void app_main(void) {
     }
 #endif
 
-    ESP_LOGI(TAG, "SENTRA S3 ready (VL53L0X=%s, MPU6050=%s, INMP441=%s, MAX98357A=%s, LegacyCam=%s, LegacyWM8960=%s).",
+    ESP_LOGI(TAG, "SENTRA S3 ready (VL53L0X=%s, MPU6050=%s, BattADC=%s, INMP441=%s, MAX98357A=%s, LegacyCam=%s, LegacyWM8960=%s).",
              s_forward_tof_ready ? "ON" : "OFF",
              s_imu_ready ? "ON" : "OFF",
+             s_battery_adc_ready ? "ON" : "OFF",
              s_mic_ready ? "ON" : "OFF",
              s_speaker_ready ? "ON" : "OFF",
              s_camera_ready ? "ON" : "OFF",

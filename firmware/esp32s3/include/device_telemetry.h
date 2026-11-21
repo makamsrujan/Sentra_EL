@@ -32,6 +32,9 @@ typedef struct {
     bool imu_valid;
     bool imu_calibrated;
     sentra_mpu_sample_t imu_sample;
+
+    bool battery_voltage_valid;
+    float battery_voltage_v;
 } sentra_telemetry_snapshot_t;
 
 /** Pure-C Express-compatible JSON serializer (host-testable & firmware-shared). */
@@ -47,6 +50,7 @@ void sentra_telemetry_set_forward_tof_initialized(bool value);
 void sentra_telemetry_set_wm8960_initialized(bool value);
 void sentra_telemetry_set_audio_output_initialized(bool value);
 void sentra_telemetry_set_vl53l5cx_initialized(bool value);
+void sentra_telemetry_set_battery_adc_initialized(bool value);
 void sentra_telemetry_update_forward_tof(const vl53l0x_reading_t *reading, sentra_obstacle_level_t obstacle_level);
 void sentra_telemetry_task(void *argument);
 

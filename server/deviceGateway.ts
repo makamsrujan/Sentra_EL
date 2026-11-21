@@ -80,6 +80,7 @@ interface InternalDeviceState {
   lastSequence: number | null;
   uptimeMs: number | null;
   batteryPercent: number | null;
+  batteryVoltageV: number | null;
   batteryCharging: boolean | null;
   earphoneConnected: boolean | null;
   audioVolume: number | null;
@@ -213,6 +214,7 @@ export class DeviceGateway {
       lastSequence: null,
       uptimeMs: null,
       batteryPercent: null,
+      batteryVoltageV: null,
       batteryCharging: null,
       earphoneConnected: null,
       audioVolume: null,
@@ -418,6 +420,7 @@ export class DeviceGateway {
       state.firmwareVersion = payload.firmwareVersion ?? null;
     }
     state.batteryPercent = payload.batteryPercent ?? null;
+    state.batteryVoltageV = payload.batteryVoltageV ?? null;
     state.batteryCharging = payload.batteryCharging ?? null;
     state.earphoneConnected = payload.earphoneConnected ?? null;
     state.audioVolume = payload.audioVolume ?? null;
@@ -1042,6 +1045,7 @@ export class DeviceGateway {
       lastSequence: state.lastSequence,
       uptimeMs: state.uptimeMs,
       batteryPercent: state.batteryPercent,
+      batteryVoltageV: state.batteryVoltageV,
       batteryCharging: state.batteryCharging,
       earphoneConnected: state.earphoneConnected,
       audioVolume: state.audioVolume,

@@ -84,6 +84,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
         'firmware/esp32s3/src/obstacle_awareness.c',
         'firmware/esp32s3/src/local_alerts.c',
         'firmware/esp32s3/src/i2s_audio.c',
+        'firmware/esp32s3/src/battery_adc.c',
         'firmware/esp32s3/src/device_telemetry.c',
         '-lm',
         '-o',
@@ -93,7 +94,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
     );
 
     const normalOut = execFileSync(binPath, [], { cwd: rootDir, encoding: 'utf8' });
-    expect(normalOut).toContain('all 13 ESP32-S3 firmware pre-hardware unit tests passed');
+    expect(normalOut).toContain('all 14 ESP32-S3 firmware pre-hardware unit tests passed');
 
     // Verify separate disabled-by-default discrete audio profile (INMP441 + MAX98357A) passes compile-time pin conflict guards
     const audioBinPath = path.join(tmpDir, 'sentra_fw_audio_test');
@@ -115,6 +116,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
         'firmware/esp32s3/src/obstacle_awareness.c',
         'firmware/esp32s3/src/local_alerts.c',
         'firmware/esp32s3/src/i2s_audio.c',
+        'firmware/esp32s3/src/battery_adc.c',
         'firmware/esp32s3/src/device_telemetry.c',
         '-lm',
         '-o',
@@ -123,7 +125,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
       { cwd: rootDir, stdio: 'pipe' }
     );
     const audioOut = execFileSync(audioBinPath, [], { cwd: rootDir, encoding: 'utf8' });
-    expect(audioOut).toContain('all 13 ESP32-S3 firmware pre-hardware unit tests passed');
+    expect(audioOut).toContain('all 14 ESP32-S3 firmware pre-hardware unit tests passed');
 
     // Verify separate ESP32-CAM sender pure-C helper logic
     const camBinPath = path.join(tmpDir, 'sentra_cam_test');
@@ -167,11 +169,14 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
       body: validJsonFromC,
     });
     expect(postValid.status).toBe(200);
+    const postValidBody = await postValid.json();
+    expect(postValidBody.state.batteryVoltageV).toBeCloseTo(3.92, 2);
 
     const statusValidRes = await fetch(`${baseUrl}/api/device/status?deviceId=${deviceId}`);
     const statusValid = await statusValidRes.json();
     expect(statusValid.telemetry.deviceId).toBe(deviceId);
     expect(statusValid.telemetry.lastSequence).toBe(42);
+    expect(statusValid.telemetry.batteryVoltageV).toBeCloseTo(3.92, 2);
     expect(statusValid.telemetry.sensors.forwardDistanceCm).toBeCloseTo(42.5, 1);
     expect(statusValid.telemetry.sensors.downwardDistanceMm).toBeNull();
     expect(statusValid.telemetry.sensors.imu.calibrated).toBe(true);
@@ -192,10 +197,13 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
       body: missingJsonFromC,
     });
     expect(postMissing.status).toBe(200);
+    const postMissingBody = await postMissing.json();
+    expect(postMissingBody.state.batteryVoltageV).toBeNull();
 
     const statusMissingRes = await fetch(`${baseUrl}/api/device/status?deviceId=${deviceId}`);
     const statusMissing = await statusMissingRes.json();
     expect(statusMissing.telemetry.lastSequence).toBe(43);
+    expect(statusMissing.telemetry.batteryVoltageV).toBeNull();
     expect(statusMissing.telemetry.sensors.forwardDistanceCm).toBeNull();
     expect(statusMissing.telemetry.sensors.imu).toBeNull();
     expect(statusMissing.telemetry.sensors.headPitchDeg).toBeNull();

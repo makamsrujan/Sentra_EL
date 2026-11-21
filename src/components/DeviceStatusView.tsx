@@ -290,16 +290,26 @@ export const DeviceStatusView: React.FC<DeviceStatusViewProps> = ({
               )}
             </div>
             <p className="text-2xl font-bold text-foreground mt-1 font-mono tabular-nums">
-              {dev?.connected && dev.batteryPercent !== null
+              {!dev?.connected
+                ? '—'
+                : dev.batteryPercent !== null
                 ? `${Math.round(dev.batteryPercent)}%`
+                : dev.batteryVoltageV !== null && dev.batteryVoltageV !== undefined
+                ? `${dev.batteryVoltageV.toFixed(2)} V`
                 : '—'}
             </p>
-            <p className="text-[11px] text-muted-foreground">
-              {dev?.connected
-                ? dev.batteryPercent !== null
-                  ? 'Reported'
-                  : '5000mAh USB Bank (No Fuel Gauge)'
-                : 'Offline'}
+            <p className="text-[11px] text-muted-foreground font-mono">
+              {!dev?.connected
+                ? 'Offline'
+                : dev.batteryPercent !== null &&
+                  dev.batteryVoltageV !== null &&
+                  dev.batteryVoltageV !== undefined
+                ? `${dev.batteryVoltageV.toFixed(2)} V · ADC1 GPIO6`
+                : dev.batteryPercent !== null
+                ? 'Reported'
+                : dev.batteryVoltageV !== null && dev.batteryVoltageV !== undefined
+                ? 'ADC1 GPIO6 (Measured)'
+                : '5000mAh USB Bank (No Fuel Gauge)'}
             </p>
           </div>
 

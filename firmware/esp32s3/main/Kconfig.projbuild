@@ -66,6 +66,26 @@ config SENTRA_PIN_ACTION_BUTTON
     int "User action / PTT GPIO (-1 to disable)"
     default 5
 
+config SENTRA_ENABLE_BATTERY_ADC
+    bool "Enable ESP32-S3 ADC1 battery voltage monitor (requires external voltage divider <= 3.3V)"
+    default y
+    help
+        Reads battery voltage via an ESP32-S3 ADC1 GPIO (GPIO 1..10, Wi-Fi safe).
+        NEVER connect >3.3V directly to an ESP32-S3 pin; use an external resistor divider
+        (e.g., 100 kOhm / 100 kOhm = 2000 milliratio). Unwired pins (<0.25V) report null.
+
+config SENTRA_PIN_BATTERY_ADC
+    int "Battery voltage ADC1 GPIO (default: 6 = ADC1_CH5; valid ADC1 range: 1..10)"
+    depends on SENTRA_ENABLE_BATTERY_ADC
+    default 6
+    range 1 10
+
+config SENTRA_BATTERY_ADC_SCALE_MILLI
+    int "Battery voltage divider multiplier x1000 (e.g., 2000 for 100k/100k 2:1 divider)"
+    depends on SENTRA_ENABLE_BATTERY_ADC
+    default 2000
+    range 1000 10000
+
 endmenu
 
 menu "Step 4: Optional Discrete I2S Audio (INMP441 + MAX98357A, Disabled by Default)"

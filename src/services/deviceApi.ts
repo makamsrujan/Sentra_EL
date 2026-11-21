@@ -188,6 +188,7 @@ export async function registerHardwareDevice(params: {
 export async function sendSimulatedTelemetry(
   payload: {
     batteryPercent?: number | null;
+    batteryVoltageV?: number | null;
     forwardDistanceCm?: number | null;
     downwardDistanceMm?: number | null;
     headPitchDeg?: number | null;
