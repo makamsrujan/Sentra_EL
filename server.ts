@@ -875,6 +875,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
             }
           : null,
       useWearableFrame: d.useWearableFrame,
+      language: d.language,
       store,
     });
 
@@ -887,6 +888,31 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     }
 
     return res.json(result);
+  });
+
+  // Ensure unknown /api/* routes always return JSON instead of falling through to SPA HTML
+  app.use('/api', (_req, res) => {
+    res.status(404).json({
+      ok: false,
+      status: 'error',
+      error: 'API endpoint not found.',
+    });
+  });
+
+  // Ensure Express body-parser / runtime errors on /api/* always return JSON instead of HTML
+  app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const status = typeof err?.status === 'number' && err.status >= 400 ? err.status : 500;
+    const message =
+      err?.type === 'entity.too.large'
+        ? 'Camera image payload was too large. Retrying with a smaller frame.'
+        : err?.message || 'Unexpected server error.';
+    res.status(status).json({
+      ok: false,
+      status: 'error',
+      errorCode: 'UPSTREAM_ERROR',
+      errorMessage: message,
+      spokenResponse: 'I had trouble processing that request on the server. Please try again.',
+    });
   });
 
   return { app, store, gateway, audioReplyStore };

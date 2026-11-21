@@ -5,8 +5,8 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CameraView, CameraViewHandle } from './components/CameraView';
+import { AssistantHomeView } from './components/AssistantHomeView';
 import { LiveVisionView } from './components/LiveVisionView';
-import { ObjectFinderView } from './components/ObjectFinderView';
 import { SpatialWorldView } from './components/SpatialWorldView';
 import { ContextualMemoryView } from './components/ContextualMemoryView';
 import { DeviceStatusView } from './components/DeviceStatusView';
@@ -18,16 +18,20 @@ import {
   SentraMemoryItem,
   SentraMode,
   SentraOperation,
-  SentraSection,
   SentraSettings,
   SentraStats,
   SpatialLandmark,
   SpatialRelationship,
   VerificationStep,
-  ReachGuidance,
 } from './types/sentra';
 import type { CameraSourceType, PathSafetyStatus } from './types/deviceProtocol';
 import { parseVoiceIntent } from './utils/parser';
+import {
+  assessFrameVisibility,
+  deriveUnifiedSessionPhase,
+  parseDirectSessionControl,
+  shouldSpeakContinuousUpdate,
+} from './utils/sessionControls';
 import {
   isSpeaking,
   playChime,
@@ -36,9 +40,8 @@ import {
   stopSpeaking,
   subscribeSpeakingState,
 } from './utils/audio';
-import { analyzeLocalScene } from './utils/localVision';
 import { useDeviceTelemetry } from './hooks/useDeviceTelemetry';
-import { useVoiceAssistant, VoiceAssistantState } from './hooks/useVoiceAssistant';
+import { useVoiceAssistant } from './hooks/useVoiceAssistant';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
 import {
@@ -53,38 +56,21 @@ import { useFirebase } from './contexts/FirebaseContext';
 import { useGeminiLiveVoice } from './hooks/useGeminiLiveVoice';
 import type { LiveVoiceName } from './lib/firebase';
 import {
-  Mic,
-  MicOff,
-  Eye,
-  Crosshair,
-  Compass,
-  Bookmark,
-  Cpu,
-  Sliders,
-  RotateCcw,
-  Volume2,
-  VolumeX,
-  Send,
-  Sparkles,
-  Layers,
-  Radio,
   AlertTriangle,
-  Wifi,
-  WifiOff,
-  FlaskConical,
-  Menu,
-  RefreshCw,
-  X,
+  ArrowLeft,
+  LogOut,
   PhoneCall,
   PhoneOff,
-  LogIn,
-  LogOut,
   User as UserIcon,
 } from 'lucide-react';
+
+type ActiveTopView = 'assistant' | 'device' | 'settings';
 
 const STATS_STORAGE_KEY = 'sentra.stats.v2';
 const MEMORY_STORAGE_KEY = 'sentra.memory.v2';
 const SETTINGS_STORAGE_KEY = 'sentra.settings.v2';
+const INITIAL_ASSISTANT_MESSAGE =
+  'Press Start Sentra to turn on your camera and microphone, then say “Hey Sentra” and ask anything about your surroundings.';
 
 const DEFAULT_STATS: SentraStats = {
   calls: 0,
@@ -135,49 +121,42 @@ export default function App() {
   const cameraRef = useRef<CameraViewHandle | null>(null);
   const firebase = useFirebase();
 
-  const [activeSection, setActiveSection] = useState<SentraSection>('assistant');
+  const [activeView, setActiveView] = useState<ActiveTopView>('assistant');
+  const [showCameraPreview, setShowCameraPreview] = useState(false);
   const [liveVoicePersona, setLiveVoicePersona] = useState<LiveVoiceName>('Zephyr');
 
-  // Core assistant state
+  // Unified session state
   const isOnline = useOnlineStatus();
+  const [sessionActive, setSessionActive] = useState(false);
+  const [isStartingSession, setIsStartingSession] = useState(false);
+  const [isSwitchingSource, setIsSwitchingSource] = useState(false);
   const [isAudioSpeaking, setIsAudioSpeaking] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
   const [spokenTranscript, setSpokenTranscript] = useState<string>('');
-  const [assistantResponse, setAssistantResponse] = useState<string>(
-    'Enable "Hey SENTRA" hands-free voice, hold Talk, or type a question. Camera is only needed for visual tasks.'
-  );
+  const [assistantResponse, setAssistantResponse] = useState<string>(INITIAL_ASSISTANT_MESSAGE);
   const [lastAppError, setLastAppError] = useState<string | null>(null);
+  const [typedQuery, setTypedQuery] = useState('');
 
-  // Perception & World Model State (strictly empty until real observations arrive)
+  // Perception & World Model State (strictly populated from real observations)
   const [detectedObjects, setDetectedObjects] = useState<DetectedObject[]>([]);
   const [detectionTimestamp, setDetectionTimestamp] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState<number>(() => Date.now());
   const [activeHazard, setActiveHazard] = useState<HazardAlert | null>(null);
   const [activePerceptionPrompt, setActivePerceptionPrompt] = useState<string | null>(null);
   const [sceneDescription, setSceneDescription] = useState<string>(
-    'No observation analyzed yet. Start a camera stream and capture or ask SENTRA to describe surroundings.'
+    'No observation analyzed yet. Start Sentra to observe your surroundings.'
   );
   const [rawPathStatus, setRawPathStatus] = useState<PathSafetyStatus>('unknown');
 
-  // Goal Task Management
+  // Continuing Task State
   const [currentGoal, setCurrentGoal] = useState<GoalTask | null>(null);
   const [isCameraReady, setIsCameraReady] = useState(false);
-  const [reachGuidance, setReachGuidance] = useState<ReachGuidance | null>(null);
+  const cameraContainerRef = useRef<HTMLDivElement | null>(null);
 
-  // Spatial World Model (only populated from real detections)
+  // Spatial context populated only from real detections
   const [landmarks, setLandmarks] = useState<SpatialLandmark[]>([]);
   const [relationships, setRelationships] = useState<SpatialRelationship[]>([]);
-  const [currentRoom, setCurrentRoom] = useState<string>('Current Area');
-
-  // Offline/degraded vision indicator
-  const [isLocalAssistActive, setIsLocalAssistActive] = useState(false);
-
-  // Inline inputs (never window.prompt)
-  const [typedQuery, setTypedQuery] = useState('');
-  const [showTextInput, setShowTextInput] = useState(false);
-  const [showQuickFindInput, setShowQuickFindInput] = useState(false);
-  const [quickFindValue, setQuickFindValue] = useState('');
+  const [currentRoom, setCurrentRoom] = useState<string>('Home');
 
   // Persistence state
   const [memories, setMemories] = useState<SentraMemoryItem[]>(() => {
@@ -207,7 +186,11 @@ export default function App() {
     }
   });
 
-  // Mutable refs for safe async loops & keyboard shortcuts without stale closures
+  // Mutable refs for safe async callbacks & avoiding stale closures
+  const sessionActiveRef = useRef(sessionActive);
+  sessionActiveRef.current = sessionActive;
+  const isSwitchingSourceRef = useRef(isSwitchingSource);
+  isSwitchingSourceRef.current = isSwitchingSource;
   const isProcessingRef = useRef(isProcessing);
   isProcessingRef.current = isProcessing;
   const currentGoalRef = useRef(currentGoal);
@@ -218,7 +201,12 @@ export default function App() {
   memoriesRef.current = memories;
   const isCameraReadyRef = useRef(isCameraReady);
   isCameraReadyRef.current = isCameraReady;
+  const assistantResponseRef = useRef(assistantResponse);
+  assistantResponseRef.current = assistantResponse;
   const historyRef = useRef<Array<{ role: 'user' | 'assistant'; text: string }>>([]);
+  const targetWasVisibleRef = useRef<boolean>(false);
+  const lastSpokenMetaRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
+  const analyzeAbortRef = useRef<AbortController | null>(null);
 
   // Sync audio mute & volume config and reactive speaking state
   useEffect(() => {
@@ -232,7 +220,13 @@ export default function App() {
     return subscribeSpeakingState(setIsAudioSpeaking);
   }, []);
 
-  // Load persisted SQLite memories on mount
+  useEffect(() => {
+    return () => {
+      analyzeAbortRef.current?.abort();
+    };
+  }, []);
+
+  // Load persisted backend memories on mount
   useEffect(() => {
     let active = true;
     fetchMemories()
@@ -243,16 +237,15 @@ export default function App() {
           localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(serverMemories));
         } catch {}
       })
-      .catch((err) => {
-        if (!active) return;
-        setLastAppError(`Memory sync fallback: ${err?.message || 'Unable to reach /api/memories'}`);
+      .catch(() => {
+        // Silently retain local memories if backend memory route is unreachable on boot
       });
     return () => {
       active = false;
     };
   }, []);
 
-  // Sync Firebase user account profile & merge Cloud Firestore memories on sign-in
+  // Sync Firebase profile & merge Cloud Firestore memories on sign-in
   useEffect(() => {
     if (!firebase.authReady || !firebase.user) return;
     firebase.syncProfile(settingsRef.current, liveVoicePersona).catch(() => {});
@@ -311,9 +304,21 @@ export default function App() {
     } catch {}
   }, []);
 
-  const [audioOwnership, setAudioOwnership] = useState<'browser' | 'wearable' | 'test'>('wearable');
+  const [audioOwnership, setAudioOwnership] = useState<'browser' | 'wearable' | 'test'>('browser');
   const audioOwnershipRef = useRef(audioOwnership);
   audioOwnershipRef.current = audioOwnership;
+
+  const speakAndDisplay = useCallback((message: string, opts?: { speak?: boolean }) => {
+    setAssistantResponse(message);
+    const shouldSpeak = opts?.speak !== false;
+    if (
+      shouldSpeak &&
+      (audioOwnershipRef.current !== 'wearable' || !activeDeviceRef.current?.connected)
+    ) {
+      lastSpokenMetaRef.current = { text: message, at: Date.now() };
+      speakText(message, settingsRef.current.speechRate);
+    }
+  }, []);
 
   // Device Telemetry & Analytics Gateway Hook (SSE + fallback polling)
   const handleTelemetryAlert = useCallback(
@@ -359,20 +364,16 @@ export default function App() {
   }, []);
 
   const handleWearableVoiceTurn = useCallback((turn: any) => {
-    if (turn.transcript) {
-      setSpokenTranscript(turn.transcript);
-    }
-    if (turn.spokenResponse) {
-      setAssistantResponse(turn.spokenResponse);
-    }
-    if (turn.analysis?.hazard) {
-      setActiveHazard(turn.analysis.hazard);
-    }
+    if (turn.transcript) setSpokenTranscript(turn.transcript);
+    if (turn.spokenResponse) setAssistantResponse(turn.spokenResponse);
+    if (turn.analysis?.hazard) setActiveHazard(turn.analysis.hazard);
   }, []);
 
   const handleWearableGoalUpdate = useCallback((update: { deviceId: string; goal: GoalTask | null }) => {
-    if (!settingsRef.current.selectedWearableDeviceId ||
-        update.deviceId === settingsRef.current.selectedWearableDeviceId) {
+    if (
+      !settingsRef.current.selectedWearableDeviceId ||
+      update.deviceId === settingsRef.current.selectedWearableDeviceId
+    ) {
       setCurrentGoal(update.goal);
     }
   }, []);
@@ -398,7 +399,39 @@ export default function App() {
   const activeDeviceRef = useRef(activeDevice);
   activeDeviceRef.current = activeDevice;
 
-  // Clear stale vision hazard automatically if ToF recovers cleanly
+  // Detect mid-session wearable disconnect honestly and pause wearable visual guidance
+  const prevWearableConnectedRef = useRef<boolean>(false);
+  useEffect(() => {
+    const nowConnected = Boolean(activeDevice?.connected);
+    const wasConnected = prevWearableConnectedRef.current;
+    prevWearableConnectedRef.current = nowConnected;
+
+    if (
+      wasConnected &&
+      !nowConnected &&
+      sessionActiveRef.current &&
+      settingsRef.current.cameraSource === 'esp32_camera'
+    ) {
+      analyzeAbortRef.current?.abort();
+      setDetectedObjects([]);
+      setDetectionTimestamp(null);
+      setActivePerceptionPrompt(null);
+      targetWasVisibleRef.current = false;
+      if (currentGoalRef.current && currentGoalRef.current.state === 'active') {
+        setCurrentGoal((prev) =>
+          prev
+            ? { ...prev, state: 'need_observation', updatedAt: Date.now() }
+            : null
+        );
+      }
+      const msg =
+        'Wearable camera disconnected. Visual guidance is paused. Switch to Mobile Camera or check Device Setup.';
+      setLastAppError(msg);
+      speakAndDisplay(msg);
+    }
+  }, [activeDevice?.connected, speakAndDisplay]);
+
+  // Clear hardware sensor hazard automatically when ToF returns clear
   useEffect(() => {
     if (!activeDevice || !activeDevice.connected) return;
     const fwd = activeDevice.sensors.forwardDistanceCm;
@@ -414,7 +447,6 @@ export default function App() {
     }
   }, [activeDevice, activeHazard]);
 
-  // Hardware-level alerts can NEVER be overridden to safe by vision status
   const effectivePathStatus: PathSafetyStatus = useMemo(() => {
     if (activeHazard?.severity === 'critical' && activeHazard.source === 'sensor_hardware') {
       return 'confirmed_sensor_alert';
@@ -425,7 +457,7 @@ export default function App() {
     return rawPathStatus;
   }, [activeHazard, isCameraReady, rawPathStatus]);
 
-  // Memory CRUD wired to SQLite backend + Cloud Firestore when authenticated
+  // Memory CRUD wired to backend + Cloud Firestore when signed in
   const handleAddMemory = useCallback(
     async (label: string, note: string, room?: string) => {
       const heading = cameraRef.current?.heading ?? activeDeviceRef.current?.sensors.imu?.heading ?? null;
@@ -439,17 +471,9 @@ export default function App() {
         });
         saveMemoriesLocally([created, ...memoriesRef.current]);
         if (firebase.user) {
-          firebase
-            .saveMemory({
-              id: created.id,
-              label: created.label,
-              note: created.note,
-              room: created.room,
-              source: created.source,
-            })
-            .catch(() => {});
+          firebase.saveMemory(created).catch(() => {});
         }
-      } catch (err: any) {
+      } catch {
         const localFallback: SentraMemoryItem = {
           id: `mem-${Date.now()}`,
           label,
@@ -462,17 +486,7 @@ export default function App() {
         };
         saveMemoriesLocally([localFallback, ...memoriesRef.current]);
         if (firebase.user) {
-          firebase
-            .saveMemory({
-              id: localFallback.id,
-              label: localFallback.label,
-              note: localFallback.note,
-              room: localFallback.room,
-              source: localFallback.source,
-            })
-            .catch(() => {});
-        } else {
-          setLastAppError(`Memory saved locally (server sync failed): ${err?.message || 'unknown'}`);
+          firebase.saveMemory(localFallback).catch(() => {});
         }
       }
     },
@@ -484,9 +498,7 @@ export default function App() {
       saveMemoriesLocally(memoriesRef.current.filter((m) => m.id !== id));
       try {
         await deleteMemory(id);
-      } catch (err: any) {
-        setLastAppError(`Memory delete sync error: ${err?.message || 'unknown'}`);
-      }
+      } catch {}
       if (firebase.user) {
         firebase.removeMemory(id).catch(() => {});
       }
@@ -499,31 +511,30 @@ export default function App() {
     saveMemoriesLocally([]);
     try {
       await clearAllMemories();
-    } catch (err: any) {
-      setLastAppError(`Memory clear sync error: ${err?.message || 'unknown'}`);
-    }
+    } catch {}
     if (firebase.user) {
       Promise.all(existingIds.map((id) => firebase.removeMemory(id))).catch(() => {});
     }
   }, [saveMemoriesLocally, firebase]);
 
-  const analyzeAbortRef = useRef<AbortController | null>(null);
-
-  useEffect(() => {
-    return () => {
-      analyzeAbortRef.current?.abort();
-    };
-  }, []);
-
-  // Core Multimodal Analysis Pipeline
+  // Core Multimodal Conversational Analysis Pipeline (no brittle keyword gate)
   const executeAnalysis = useCallback(
     async (
       mode: SentraMode,
       query = '',
       goalTargetOverride?: string | null,
-      operationOverride?: SentraOperation
+      operationOverride?: SentraOperation,
+      options?: { isContinuousCheck?: boolean; interruptExisting?: boolean }
     ): Promise<boolean> => {
-      if (isProcessingRef.current) return false;
+      if (isSwitchingSourceRef.current) return false;
+      if (isProcessingRef.current) {
+        if (options?.interruptExisting) {
+          analyzeAbortRef.current?.abort();
+        } else {
+          return false;
+        }
+      }
+
       isProcessingRef.current = true;
       setIsProcessing(true);
       const startTime = performance.now();
@@ -533,8 +544,21 @@ export default function App() {
       const curMemories = memoriesRef.current;
       const curDevice = activeDeviceRef.current;
 
-      if (curSettings.audioFeedback) {
+      if (!options?.isContinuousCheck && curSettings.audioFeedback) {
         playChime('capture');
+      }
+
+      // Guard: if wearable source is selected and offline, never fabricate visual guidance
+      if (curSettings.cameraSource === 'esp32_camera' && !curDevice?.connected) {
+        isProcessingRef.current = false;
+        setIsProcessing(false);
+        const msg =
+          'Wearable camera is not connected, so I cannot see your surroundings right now. Switch to Mobile Camera or open Device Setup.';
+        setLastAppError(msg);
+        if (!options?.isContinuousCheck) {
+          speakAndDisplay(msg);
+        }
+        return false;
       }
 
       const snapshot = (await cameraRef.current?.captureSnapshot()) || {
@@ -546,18 +570,58 @@ export default function App() {
         source: curSettings.cameraSource,
       };
 
+      // Honest optical quality check: pause movement guidance if frame is unusable dark or blurry
+      if (snapshot.dataUrl) {
+        const visibility = assessFrameVisibility(snapshot.quality);
+        if (!visibility.usable && visibility.spokenGuidance) {
+          isProcessingRef.current = false;
+          setIsProcessing(false);
+          setActivePerceptionPrompt(visibility.spokenGuidance);
+          if (curGoal) {
+            setCurrentGoal((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    state: 'need_observation',
+                    requiredObservation: visibility.spokenGuidance,
+                    updatedAt: Date.now(),
+                  }
+                : null
+            );
+          }
+          const shouldSpeak =
+            !options?.isContinuousCheck ||
+            shouldSpeakContinuousUpdate({
+              nextText: visibility.spokenGuidance,
+              lastSpokenText: lastSpokenMetaRef.current.text,
+              lastSpokenAt: lastSpokenMetaRef.current.at,
+              now: Date.now(),
+              foundTarget: false,
+              targetLostFromView: false,
+              hasHazard: false,
+            });
+          speakAndDisplay(visibility.spokenGuidance, { speak: shouldSpeak });
+          return false;
+        }
+      }
+
       const sensorsSummary = cameraRef.current?.getSensorsSummary() || '';
       const heading = cameraRef.current?.heading ?? curDevice?.sensors.imu?.heading ?? null;
       const activeGoalTarget =
         goalTargetOverride !== undefined ? goalTargetOverride : curGoal?.targetObject ?? null;
 
+      // Always allow Gemini to inspect the live frame whenever one is captured;
+      // only route pure device_status queries without requiring camera vision.
+      const parsedHint = query ? parseVoiceIntent(query) : null;
       const inferredOp: SentraOperation =
         operationOverride ??
-        (query
-          ? parseVoiceIntent(query).operation
-          : mode === 'find' || mode === 'navigate'
+        (parsedHint?.operation === 'device_status'
+          ? 'device_status'
+          : activeGoalTarget
           ? 'object_query'
-          : 'scene_analysis');
+          : snapshot.dataUrl || curSettings.cameraSource === 'esp32_camera'
+          ? 'scene_analysis'
+          : 'conversation');
 
       analyzeAbortRef.current?.abort();
       const abortController = new AbortController();
@@ -578,13 +642,20 @@ export default function App() {
             sensors: sensorsSummary,
             goal: activeGoalTarget,
             memory: curMemories.slice(-30),
-            history: historyRef.current.slice(-6),
+            history: historyRef.current.slice(-10),
             heading,
             useWearableFrame: curSettings.cameraSource === 'esp32_camera',
             wearableDeviceId: curSettings.selectedWearableDeviceId,
           },
           abortController.signal
         );
+
+        // Discard response if session stopped or source changed mid-flight
+        if (abortController.signal.aborted || isSwitchingSourceRef.current) {
+          isProcessingRef.current = false;
+          setIsProcessing(false);
+          return false;
+        }
 
         isProcessingRef.current = false;
         setIsProcessing(false);
@@ -597,44 +668,20 @@ export default function App() {
         }));
 
         if (data.status !== 'ok' || data.errorCode) {
-          setIsLocalAssistActive(Boolean(data.errorCode && data.errorCode !== 'NO_FRESH_IMAGE'));
-          if (data.errorMessage) {
-            setLastAppError(`${data.errorCode || 'ANALYSIS_ERROR'}: ${data.errorMessage}`);
+          const errorDetail = data.errorMessage || 'Visual AI service is currently unavailable.';
+          setLastAppError(errorDetail);
+          const spoken =
+            data.spokenResponse ||
+            data.text ||
+            'I could not complete that check right now. Please try again in a moment.';
+          if (data.pathStatus) setRawPathStatus(data.pathStatus);
+          if (!options?.isContinuousCheck) {
+            speakAndDisplay(spoken);
           }
-
-          let spoken = data.spokenResponse || data.text || 'Unable to analyze scene right now.';
-          // Only invoke optical local heuristics when Gemini API is unavailable/exhausted AND a camera stream exists
-          if (
-            (data.errorCode === 'MISSING_API_KEY' ||
-              data.errorCode === 'QUOTA_EXHAUSTED' ||
-              data.errorCode === 'UPSTREAM_ERROR' ||
-              data.errorCode === 'TIMEOUT') &&
-            cameraRef.current?.getVideoElement()
-          ) {
-            const localFallback = analyzeLocalScene(
-              cameraRef.current.getVideoElement(),
-              heading,
-              curMemories,
-              mode,
-              query,
-              activeGoalTarget
-            );
-            spoken = `${spoken} ${localFallback.text}`.trim();
-          }
-
-          if (data.pathStatus) {
-            setRawPathStatus(data.pathStatus);
-          }
-
-          setAssistantResponse(spoken);
-          speakText(spoken, curSettings.speechRate);
           return false;
         }
 
-        // Successful Gemini analysis
-        setIsLocalAssistActive(false);
         setLastAppError(null);
-
         const frameTs = data.frameTimestamp || snapshot.timestamp || Date.now();
         let spoken = data.spokenResponse || data.text || 'Observation complete.';
 
@@ -649,15 +696,11 @@ export default function App() {
           setDetectionTimestamp(frameTs);
         }
 
-        if (data.sceneDescription) {
-          setSceneDescription(data.sceneDescription);
-        }
-        if (data.pathStatus) {
-          setRawPathStatus(data.pathStatus);
-        }
+        if (data.sceneDescription) setSceneDescription(data.sceneDescription);
+        if (data.pathStatus) setRawPathStatus(data.pathStatus);
         setActivePerceptionPrompt(data.activePerceptionRequest || null);
 
-        // Update Spatial Landmarks from verified visible detections when heading is known
+        // Update spatial landmarks when heading is known
         if (heading != null && data.detectedObjects && data.detectedObjects.length > 0) {
           const landmarkObjects = data.detectedObjects.filter(
             (o) => isLandmarkable(o.label) || o.isTargetGoal
@@ -666,14 +709,6 @@ export default function App() {
             setLandmarks((prev) => {
               const updated = [...prev];
               for (const obj of landmarkObjects) {
-                const distText =
-                  obj.relativeDistance === 'arm_reach'
-                    ? 'Arm reach'
-                    : obj.relativeDistance === 'near'
-                    ? '1 step ahead'
-                    : obj.relativeDistance === 'mid'
-                    ? '3 steps ahead'
-                    : '4 steps ahead';
                 const existingIdx = updated.findIndex(
                   (l) => l.name.toLowerCase() === obj.label.toLowerCase()
                 );
@@ -681,16 +716,13 @@ export default function App() {
                   id: existingIdx >= 0 ? updated[existingIdx].id : `lm-${Date.now()}-${obj.id}`,
                   name: obj.label,
                   heading,
-                  distanceEst: distText,
+                  distanceEst: obj.relativeDistance.replace('_', ' '),
                   room: currentRoom,
                   lastSeenAt: frameTs,
                   verified: true,
                 };
-                if (existingIdx >= 0) {
-                  updated[existingIdx] = lmItem;
-                } else {
-                  updated.push(lmItem);
-                }
+                if (existingIdx >= 0) updated[existingIdx] = lmItem;
+                else updated.push(lmItem);
               }
               return updated.slice(-24);
             });
@@ -698,166 +730,145 @@ export default function App() {
         }
 
         // Reach guidance
-        if (data.reachGuidance && data.reachGuidance.active) {
-          setReachGuidance(data.reachGuidance);
-          if (curSettings.reachGuidanceEnabled && !data.hazard) {
-            spoken = `${spoken} ${data.reachGuidance.handInstruction}`.trim();
-            if (curSettings.audioFeedback) playChime('found');
-          }
-        } else {
-          setReachGuidance(null);
+        if (
+          data.reachGuidance &&
+          data.reachGuidance.active &&
+          curSettings.reachGuidanceEnabled &&
+          !data.hazard &&
+          !spoken.includes(data.reachGuidance.handInstruction)
+        ) {
+          spoken = `${spoken} ${data.reachGuidance.handInstruction}`.trim();
         }
 
-        // Vision hazard alert (never overrides hardware sensor alert already present)
+        // Vision hazard alert (never overrides confirmed hardware ToF hazard)
         const hasActiveHardwareHazard =
           activeHazard?.severity === 'critical' && activeHazard.source === 'sensor_hardware';
+        const hasNewHazard = Boolean(data.hazard && !hasActiveHardwareHazard);
         if (data.hazard && !hasActiveHardwareHazard) {
           setActiveHazard({ ...data.hazard, source: 'vision_ai', timestamp: Date.now() });
-          spoken = `Caution: ${data.hazard.description} at ${data.hazard.clockPosition}.`;
           if (curSettings.audioFeedback) playChime('hazard');
           updateStats((s) => ({ ...s, hazards: s.hazards + 1 }));
         } else if (!data.hazard && !hasActiveHardwareHazard) {
           setActiveHazard(null);
         }
 
-        // Explicit remember command -> persist to SQLite & Cloud Firestore
-        if (mode === 'remember' && data.rememberedData) {
+        // Save memory whenever Gemini extracts rememberedData (naturally via conversation)
+        if (data.rememberedData && data.rememberedData.label) {
+          const rem = data.rememberedData;
           try {
             const saved = await createMemory({
-              label: data.rememberedData.label || 'Saved Location',
-              note: data.rememberedData.note || spoken,
-              room: data.rememberedData.room || currentRoom,
+              label: rem.label,
+              note: rem.note || spoken,
+              room: rem.room || currentRoom,
               heading,
               source: 'live_verified',
             });
             if (saved.room) setCurrentRoom(saved.room);
-            saveMemoriesLocally([saved, ...memoriesRef.current]);
-            if (firebase.user) {
-              firebase.saveMemory(saved).catch(() => {});
-            }
-            spoken = `Saved to memory: ${saved.label}.`;
+            saveMemoriesLocally([saved, ...memoriesRef.current.filter((m) => m.id !== saved.id)]);
+            if (firebase.user) firebase.saveMemory(saved).catch(() => {});
           } catch {
             const localItem: SentraMemoryItem = {
               id: `mem-${Date.now()}`,
-              label: data.rememberedData.label || 'Saved Location',
-              note: data.rememberedData.note || spoken,
-              room: data.rememberedData.room || currentRoom,
+              label: rem.label,
+              note: rem.note || spoken,
+              room: rem.room || currentRoom,
               at: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
               timestamp: Date.now(),
               heading,
               source: 'live_verified',
             };
             saveMemoriesLocally([localItem, ...memoriesRef.current]);
-            if (firebase.user) {
-              firebase.saveMemory(localItem).catch(() => {});
-            }
-            spoken = `Saved to memory: ${localItem.label}.`;
+            if (firebase.user) firebase.saveMemory(localItem).catch(() => {});
           }
         }
 
-        // Goal verification & step tracking
-        if ((mode === 'find' || mode === 'navigate') && curGoal) {
-          if (data.foundTarget) {
-            const targetObj = data.detectedObjects?.find(
-              (o) =>
-                o.isTargetGoal ||
-                (activeGoalTarget && o.label.toLowerCase().includes(activeGoalTarget.toLowerCase()))
-            );
-            const verifiedStep: VerificationStep = {
-              id: `step-${Date.now()}`,
-              timestamp: Date.now(),
-              stepName: 'Visual Confirmation',
-              note: spoken,
-              state: 'completed',
-              outcome: 'success',
-              actionCategory: 'completed',
-              heading,
-              clockPosition: targetObj?.clockPosition || "12 o'clock",
-              confidence: targetObj?.confidence,
+        // Continuing step-by-step task lifecycle driven by Gemini intent & live observations
+        const aiGoal = data.goalUpdate;
+        const effectiveTarget = aiGoal?.targetObject || activeGoalTarget;
+        let targetLostFromView = false;
+
+        if (effectiveTarget) {
+          const targetObj = data.detectedObjects?.find(
+            (o) =>
+              o.isTargetGoal ||
+              o.label.toLowerCase().includes(effectiveTarget.toLowerCase())
+          );
+
+          const isNowVisible = Boolean(data.foundTarget || targetObj);
+          if (targetWasVisibleRef.current && !isNowVisible && curGoal) {
+            targetLostFromView = true;
+            if (!/lost|no longer|can't see|cannot see|disappear|unclear/i.test(spoken)) {
+              spoken = `I lost sight of the ${effectiveTarget}. Pausing movement guidance. Slowly adjust the camera slightly left or right.`;
+            }
+          }
+          targetWasVisibleRef.current = isNowVisible;
+
+          const aiState = aiGoal?.state?.toLowerCase();
+          const shouldComplete =
+            aiState === 'completed' ||
+            (data.foundTarget && Boolean(data.reachGuidance?.inArmReach));
+
+          const nextState: GoalTask['state'] = shouldComplete
+            ? 'completed'
+            : targetLostFromView || aiState === 'need_observation' || aiState === 'paused' || Boolean(data.activePerceptionRequest)
+            ? 'need_observation'
+            : 'active';
+
+          const step: VerificationStep = {
+            id: `step-${Date.now()}`,
+            timestamp: Date.now(),
+            stepName: shouldComplete
+              ? 'Reached Target'
+              : targetLostFromView
+              ? 'Target Lost'
+              : isNowVisible
+              ? 'Target Spotted'
+              : 'Scanning',
+            note: spoken,
+            state: nextState,
+            outcome: shouldComplete
+              ? 'success'
+              : targetLostFromView || data.activePerceptionRequest
+              ? 're_aim_needed'
+              : 'attempted',
+            actionCategory: shouldComplete ? 'completed' : 'active',
+            heading,
+            clockPosition: targetObj?.clockPosition,
+            confidence: targetObj?.confidence,
+          };
+
+          if (curGoal && curGoal.targetObject?.toLowerCase() === effectiveTarget.toLowerCase()) {
+            setCurrentGoal({
+              ...curGoal,
+              state: nextState,
+              confidence: targetObj?.confidence ?? curGoal.confidence,
+              requiredObservation: data.activePerceptionRequest || null,
+              updatedAt: Date.now(),
+              history: [...curGoal.history.slice(-12), { timestamp: Date.now(), note: spoken, state: nextState }],
+              verificationSteps: [...curGoal.verificationSteps.slice(-12), step],
+            });
+          } else if (!shouldComplete && (aiGoal?.targetObject || mode === 'find' || mode === 'navigate')) {
+            const startedGoal: GoalTask = {
+              id: String(Date.now()),
+              intent: query || `Find ${effectiveTarget}`,
+              targetObject: effectiveTarget,
+              state: nextState,
+              confidence: targetObj?.confidence ?? null,
+              requiredObservation: data.activePerceptionRequest || null,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+              history: [{ timestamp: Date.now(), note: spoken, state: nextState }],
+              verificationSteps: [step],
             };
+            setCurrentGoal(startedGoal);
+            currentGoalRef.current = startedGoal;
+            updateStats((s) => ({ ...s, findsStarted: s.findsStarted + 1 }));
+          }
 
-            setCurrentGoal((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    state: 'completed',
-                    confidence: targetObj?.confidence ?? null,
-                    updatedAt: Date.now(),
-                    history: [
-                      ...prev.history,
-                      { timestamp: Date.now(), note: 'Verified in camera view.', state: 'completed' },
-                    ],
-                    verificationSteps: [...prev.verificationSteps, verifiedStep],
-                  }
-                : null
-            );
-
+          if (shouldComplete) {
+            targetWasVisibleRef.current = false;
             updateStats((s) => ({ ...s, findsDone: s.findsDone + 1 }));
             if (curSettings.audioFeedback) playChime('found');
-
-            if (activeGoalTarget) {
-              try {
-                const autoSaved = await createMemory({
-                  label: `${activeGoalTarget} seen`,
-                  note: spoken,
-                  room: currentRoom,
-                  heading,
-                  source: 'live_verified',
-                });
-                saveMemoriesLocally([autoSaved, ...memoriesRef.current]);
-              } catch {}
-            }
-          } else if (data.activePerceptionRequest) {
-            const directiveStep: VerificationStep = {
-              id: `step-${Date.now()}`,
-              timestamp: Date.now(),
-              stepName: 'Re-aim Advisory',
-              note: data.activePerceptionRequest,
-              state: 'need_observation',
-              outcome: 're_aim_needed',
-              actionCategory: 'active',
-              heading,
-            };
-
-            setCurrentGoal((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    state: 'need_observation',
-                    requiredObservation: data.activePerceptionRequest,
-                    updatedAt: Date.now(),
-                    history: [
-                      ...prev.history,
-                      {
-                        timestamp: Date.now(),
-                        note: `Re-aim requested: ${data.activePerceptionRequest}`,
-                        state: 'need_observation',
-                      },
-                    ],
-                    verificationSteps: [...prev.verificationSteps, directiveStep],
-                  }
-                : null
-            );
-          } else {
-            const scanStep: VerificationStep = {
-              id: `step-${Date.now()}`,
-              timestamp: Date.now(),
-              stepName: 'Observation Scan',
-              note: spoken || 'Target not yet visible in analyzed frame.',
-              state: 'active',
-              outcome: 'attempted',
-              actionCategory: 'attempted',
-              heading,
-            };
-            setCurrentGoal((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    updatedAt: Date.now(),
-                    verificationSteps: [...prev.verificationSteps, scanStep],
-                  }
-                : null
-            );
           }
         }
 
@@ -874,7 +885,7 @@ export default function App() {
           setRelationships((prev) => [...prev, ...validRels].slice(-18));
         }
 
-        if (query) {
+        if (query && !options?.isContinuousCheck) {
           historyRef.current.push({ role: 'user', text: query });
         }
         historyRef.current.push({ role: 'assistant', text: spoken });
@@ -882,160 +893,173 @@ export default function App() {
           historyRef.current = historyRef.current.slice(-20);
         }
 
-        setAssistantResponse(spoken);
-        if (audioOwnershipRef.current !== 'wearable' || !activeDeviceRef.current?.connected) {
-          speakText(spoken, curSettings.speechRate);
-        }
+        const shouldSpeak =
+          !options?.isContinuousCheck ||
+          shouldSpeakContinuousUpdate({
+            nextText: spoken,
+            lastSpokenText: lastSpokenMetaRef.current.text,
+            lastSpokenAt: lastSpokenMetaRef.current.at,
+            now: Date.now(),
+            foundTarget: Boolean(data.foundTarget),
+            targetLostFromView,
+            hasHazard: hasNewHazard,
+          });
+
+        speakAndDisplay(spoken, { speak: shouldSpeak });
         return true;
       } catch (err: any) {
         isProcessingRef.current = false;
         setIsProcessing(false);
-        if (err?.name === 'AbortError') {
-          return false;
+        if (err?.name === 'AbortError') return false;
+
+        const offlineMsg = !navigator.onLine
+          ? 'Internet connection lost. Visual AI needs a network connection to answer.'
+          : `Could not reach Sentra AI right now (${err?.message || 'network error'}). Please try again.`;
+        setLastAppError(offlineMsg);
+        if (!options?.isContinuousCheck) {
+          speakAndDisplay(offlineMsg);
         }
-        setIsLocalAssistActive(true);
-        setLastAppError(`Analysis request error: ${err?.message || 'Network failure'}`);
-
-        const localResult = analyzeLocalScene(
-          cameraRef.current?.getVideoElement() || null,
-          heading,
-          curMemories,
-          mode,
-          query,
-          activeGoalTarget
-        );
-
-        setAssistantResponse(localResult.text);
-        speakText(localResult.text, curSettings.speechRate);
         return false;
       }
     },
-    [activeHazard, currentRoom, saveMemoriesLocally, updateStats]
+    [activeHazard, currentRoom, firebase, saveMemoriesLocally, speakAndDisplay, updateStats]
   );
 
-  // Handle incoming user voice or text query
+  // Unified Cancel Task (returns cleanly to listening without ending the session)
+  const handleCancelTask = useCallback(() => {
+    analyzeAbortRef.current?.abort();
+    isProcessingRef.current = false;
+    setIsProcessing(false);
+    setCurrentGoal(null);
+    currentGoalRef.current = null;
+    setActivePerceptionPrompt(null);
+    targetWasVisibleRef.current = false;
+    stopSpeaking();
+    if (settingsRef.current.audioFeedback) playChime('stop_listen');
+    speakAndDisplay('Task canceled. Listening for your next question.');
+  }, [speakAndDisplay]);
+
+  // Repeat last spoken response without re-calling AI
+  const handleRepeat = useCallback(() => {
+    const current = assistantResponseRef.current?.trim();
+    if (!current) return;
+    stopSpeaking();
+    lastSpokenMetaRef.current = { text: current, at: Date.now() };
+    speakText(current, settingsRef.current.speechRate);
+  }, []);
+
+  // Forward-declared ref for voice hook stop callback
+  const stopSessionFnRef = useRef<() => void>(() => {});
+
+  // Unified Open-Ended User Query Handler (Voice or Text)
   const handleUserQuery = useCallback(
     async (queryText: string) => {
       const trimmed = queryText.trim();
       if (!trimmed) return;
       setSpokenTranscript(trimmed);
 
-      if (/\b(stop|cancel|never mind|pause|be quiet|stop talking|stop speaking)\b/i.test(trimmed)) {
-        setCurrentGoal(null);
+      // 1. Immediate meta-controls (Stop Sentra, Cancel this task, Stop speaking, Repeat)
+      const directControl = parseDirectSessionControl(trimmed);
+      if (directControl === 'stop_session') {
+        stopSessionFnRef.current();
+        return;
+      }
+      if (directControl === 'cancel_task') {
+        handleCancelTask();
+        return;
+      }
+      if (directControl === 'stop_speaking') {
         stopSpeaking();
-        setAssistantResponse('Task and voice output stopped.');
-        if (settingsRef.current.audioFeedback) {
-          playChime('stop_listen');
-        }
+        if (settingsRef.current.audioFeedback) playChime('stop_listen');
+        setAssistantResponse('Speech stopped. Listening.');
+        return;
+      }
+      if (directControl === 'repeat') {
+        handleRepeat();
         return;
       }
 
-      const intent = parseVoiceIntent(trimmed);
+      // 2. Interrupt any current speech immediately for a fresh question
+      stopSpeaking();
+      setLastAppError(null);
 
-      if ((intent.mode === 'find' || intent.mode === 'navigate') && intent.goal) {
-        const heading = cameraRef.current?.heading ?? activeDeviceRef.current?.sensors.imu?.heading ?? null;
-        const initialStep: VerificationStep = {
-          id: `step-${Date.now()}-1`,
-          timestamp: Date.now(),
-          stepName: 'Search Initiated',
-          note: `Goal set for "${intent.goal}"${heading != null ? ` at heading ${Math.round(heading)}°` : ''}.`,
-          state: 'active',
-          outcome: 'pending',
-          actionCategory: 'active',
-          heading,
-        };
+      // 3. If user asks a question while Mobile Camera isn't started yet, start it automatically
+      if (
+        settingsRef.current.cameraSource === 'browser_camera' &&
+        !isCameraReadyRef.current &&
+        cameraRef.current
+      ) {
+        const started = await cameraRef.current.startBrowserCamera();
+        if (started) {
+          setSessionActive(true);
+          sessionActiveRef.current = true;
+          // Give video element a brief moment to deliver its first decoded frame
+          await new Promise((r) => setTimeout(r, 300));
+        }
+      }
 
+      // 4. Let Gemini understand natural intent (no fixed menu!)
+      const intentHint = parseVoiceIntent(trimmed);
+
+      // Only clear a previous task if the user is clearly asking about a brand-new find target
+      if (
+        (intentHint.mode === 'find' || intentHint.mode === 'navigate') &&
+        intentHint.goal &&
+        currentGoalRef.current?.targetObject?.toLowerCase() !== intentHint.goal.toLowerCase()
+      ) {
+        targetWasVisibleRef.current = false;
         const newGoal: GoalTask = {
           id: String(Date.now()),
           intent: trimmed,
-          targetObject: intent.goal,
+          targetObject: intentHint.goal,
           state: 'active',
           confidence: null,
           createdAt: Date.now(),
           updatedAt: Date.now(),
-          history: [
-            { timestamp: Date.now(), note: `Initiated ${intent.mode} for ${intent.goal}`, state: 'active' },
-          ],
-          verificationSteps: [initialStep],
+          history: [{ timestamp: Date.now(), note: `Started locating ${intentHint.goal}`, state: 'active' }],
+          verificationSteps: [],
         };
         setCurrentGoal(newGoal);
         currentGoalRef.current = newGoal;
         updateStats((s) => ({ ...s, findsStarted: s.findsStarted + 1 }));
-        await executeAnalysis(intent.mode, trimmed, intent.goal, intent.operation);
+        await executeAnalysis(intentHint.mode, trimmed, intentHint.goal, 'object_query', {
+          interruptExisting: true,
+        });
         return;
       }
 
-      await executeAnalysis(intent.mode, trimmed, currentGoalRef.current?.targetObject, intent.operation);
+      // Pass open-ended query + active goal context + live frame directly to Gemini
+      await executeAnalysis(
+        intentHint.mode,
+        trimmed,
+        currentGoalRef.current?.state === 'active' || currentGoalRef.current?.state === 'need_observation'
+          ? currentGoalRef.current.targetObject
+          : null,
+        intentHint.operation === 'device_status' ? 'device_status' : undefined,
+        { interruptExisting: true }
+      );
     },
-    [executeAnalysis, updateStats]
+    [executeAnalysis, handleCancelTask, handleRepeat, updateStats]
   );
 
-  // Active Object-Find Verification Loop (only triggers when goal & autoContinuousFind & live camera are active)
-  const activeGoalId = currentGoal?.id ?? null;
-  const activeGoalState = currentGoal?.state ?? null;
-
-  useEffect(() => {
-    if (!activeGoalId || activeGoalState !== 'active') return;
-    if (!settings.autoContinuousFind) return;
-
-    let cancelled = false;
-    let lastHeading: number | null = null;
-    let stationaryCount = 0;
-
-    const timer = setInterval(async () => {
-      if (cancelled) return;
-      const goal = currentGoalRef.current;
-      if (!goal || goal.state !== 'active') return;
-      if (isProcessingRef.current || isSpeaking()) return;
-      if (!isCameraReadyRef.current) return;
-
-      const curHeading = cameraRef.current?.heading ?? activeDeviceRef.current?.sensors.imu?.heading ?? null;
-      if (curHeading != null && lastHeading != null) {
-        const delta = Math.abs((curHeading - lastHeading + 360) % 360);
-        const angularDiff = delta > 180 ? 360 - delta : delta;
-        if (angularDiff < 10) {
-          stationaryCount++;
-          if (stationaryCount >= 2 && goal.targetObject) {
-            const guidance = `Still looking for ${goal.targetObject}. Slowly pan the camera left or right.`;
-            setAssistantResponse(guidance);
-            speakText(guidance, settingsRef.current.speechRate);
-            stationaryCount = 0;
-            return;
-          }
-        } else {
-          stationaryCount = 0;
-        }
+  // Voice Interrupt Handler (handles "Stop", "Cancel this task", "Stop Sentra" spoken aloud)
+  const handleVoiceInterrupt = useCallback(
+    (interruptText?: string) => {
+      stopSpeaking();
+      if (!interruptText) return;
+      const control = parseDirectSessionControl(interruptText);
+      if (control === 'stop_session') {
+        stopSessionFnRef.current();
+      } else if (control === 'cancel_task') {
+        handleCancelTask();
+      } else if (control === 'repeat') {
+        handleRepeat();
+      } else {
+        setAssistantResponse('Speech stopped. Listening.');
       }
-      lastHeading = curHeading;
-
-      await executeAnalysis('find', '', goal.targetObject ?? null, 'object_query');
-    }, 6000);
-
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [activeGoalId, activeGoalState, settings.autoContinuousFind, executeAnalysis]);
-
-  // Continuous Scene Watch Mode (non-overlapping, rate-limited)
-  useEffect(() => {
-    if (!settings.continuousWatchMode) return;
-
-    const timer = setInterval(async () => {
-      if (!settingsRef.current.continuousWatchMode) return;
-      if (!isCameraReadyRef.current) return;
-      if (isProcessingRef.current || isSpeaking()) return;
-      if (currentGoalRef.current?.state === 'active') return;
-
-      await executeAnalysis('describe', 'Periodic continuous watch observation', null, 'scene_analysis');
-    }, 7000);
-
-    return () => clearInterval(timer);
-  }, [settings.continuousWatchMode, executeAnalysis]);
-
-  const handleVoiceInterrupt = useCallback(() => {
-    stopSpeaking();
-  }, []);
+    },
+    [handleCancelTask, handleRepeat]
+  );
 
   const handleWakeWordEnabledChange = useCallback(
     (enabled: boolean) => {
@@ -1052,7 +1076,6 @@ export default function App() {
     isSpeaking: isAudioSpeaking,
     onCommand: handleUserQuery,
     onInterrupt: handleVoiceInterrupt,
-    onUnsupportedFallback: () => setShowTextInput(true),
   });
 
   const liveVoice = useGeminiLiveVoice({
@@ -1067,9 +1090,7 @@ export default function App() {
     },
     onMemorySaved: (item) => {
       saveMemoriesLocally([item, ...memoriesRef.current.filter((m) => m.id !== item.id)]);
-      if (firebase.user) {
-        firebase.saveMemory(item).catch(() => {});
-      }
+      if (firebase.user) firebase.saveMemory(item).catch(() => {});
     },
     onHardwareEvent: (evt) => {
       if (evt.event === 'PROXIMITY_CRITICAL' && evt.distanceCm != null) {
@@ -1077,7 +1098,7 @@ export default function App() {
           id: `live-hw-${Date.now()}`,
           type: 'obstacle',
           severity: 'critical',
-          description: `Forward VL53L0X measures obstacle within ${Math.round(evt.distanceCm)} cm.`,
+          description: `Forward sensor measures an obstacle within ${Math.round(evt.distanceCm)} cm.`,
           clockPosition: "12 o'clock",
           source: 'sensor_hardware',
           timestamp: Date.now(),
@@ -1102,6 +1123,240 @@ export default function App() {
     },
   });
 
+  // Single-action Start Sentra Session (starts camera + mic + announces readiness)
+  const startSentraSession = useCallback(async () => {
+    if (isStartingSession) return;
+    setIsStartingSession(true);
+    setLastAppError(null);
+    stopSpeaking();
+
+    const source = settingsRef.current.cameraSource;
+    let cameraNote = '';
+    let cameraOk = false;
+
+    if (source === 'browser_camera') {
+      cameraOk = Boolean(await cameraRef.current?.startBrowserCamera());
+      if (!cameraOk) {
+        const diag = cameraRef.current?.getCameraDiagnostics();
+        cameraNote =
+          diag?.browserError ||
+          'Camera permission was denied or no camera is available. Allow camera access in browser settings.';
+      }
+    } else {
+      cameraOk = Boolean(activeDeviceRef.current?.connected);
+      if (!cameraOk) {
+        cameraNote =
+          'Wearable camera is not connected. Open Device Setup or switch to Mobile Camera.';
+      }
+    }
+
+    let micStarted = false;
+    if (voice.compatibility.foregroundWakeSupported) {
+      micStarted = await voice.enableWakeWord();
+    }
+
+    setSessionActive(true);
+    sessionActiveRef.current = true;
+    setIsStartingSession(false);
+
+    if (settingsRef.current.audioFeedback) {
+      playChime('start_listen');
+    }
+
+    if (!cameraOk && cameraNote) {
+      setLastAppError(cameraNote);
+      const msg = micStarted
+        ? `Sentra is listening, but ${cameraNote}`
+        : `Sentra started with limited input: ${cameraNote}`;
+      speakAndDisplay(msg);
+      return;
+    }
+
+    if (micStarted) {
+      speakAndDisplay(
+        'Sentra is ready. Say Hey Sentra and ask any question, or tap the microphone button.'
+      );
+    } else if (voice.compatibility.speechRecognitionSupported) {
+      speakAndDisplay(
+        'Sentra is ready with camera active. Tap the microphone button whenever you want to speak, or type a question below.'
+      );
+    } else {
+      speakAndDisplay(
+        'Sentra camera is active. Voice recognition is unavailable in this browser, so use the text box below.'
+      );
+    }
+  }, [isStartingSession, speakAndDisplay, voice]);
+
+  // Complete Stop Sentra Session (releases camera, mic, streams, tasks, and in-flight requests)
+  const stopSentraSession = useCallback(() => {
+    analyzeAbortRef.current?.abort();
+    isProcessingRef.current = false;
+    setIsProcessing(false);
+    setIsStartingSession(false);
+    setIsSwitchingSource(false);
+    setSessionActive(false);
+    sessionActiveRef.current = false;
+
+    setCurrentGoal(null);
+    currentGoalRef.current = null;
+    setDetectedObjects([]);
+    setDetectionTimestamp(null);
+    setActiveHazard(null);
+    setActivePerceptionPrompt(null);
+    targetWasVisibleRef.current = false;
+
+    voice.disableWakeWord();
+    if (liveVoice.status === 'connected' || liveVoice.status === 'connecting') {
+      liveVoice.disconnect();
+    }
+    cameraRef.current?.stopBrowserCamera();
+    stopSpeaking();
+
+    if (settingsRef.current.audioFeedback) {
+      playChime('stop_listen');
+    }
+    const stoppedMsg = 'Sentra stopped. Camera and microphone are off.';
+    setAssistantResponse(stoppedMsg);
+    speakText('Sentra stopped.', settingsRef.current.speechRate);
+  }, [liveVoice, voice]);
+
+  stopSessionFnRef.current = stopSentraSession;
+
+  // Tap-to-Talk button handler while session is active
+  const handleTapToTalk = useCallback(() => {
+    if (!sessionActiveRef.current) {
+      startSentraSession();
+      return;
+    }
+    stopSpeaking();
+    if (isProcessingRef.current) {
+      analyzeAbortRef.current?.abort();
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+    }
+    if (!voice.compatibility.speechRecognitionSupported) {
+      speakAndDisplay('Speech recognition is not supported in this browser. Type your question below.');
+      return;
+    }
+    voice.activateCommandWindow();
+  }, [speakAndDisplay, startSentraSession, voice]);
+
+  // Safe Camera Source Switching (pauses guidance, releases previous stream, discards stale frames, announces result)
+  const handleCameraSourceChange = useCallback(
+    async (nextSource: CameraSourceType) => {
+      if (settingsRef.current.cameraSource === nextSource) return;
+
+      const wasActive = sessionActiveRef.current;
+      setIsSwitchingSource(true);
+      isSwitchingSourceRef.current = true;
+      setLastAppError(null);
+
+      // Pause visual guidance & abort stale requests immediately
+      analyzeAbortRef.current?.abort();
+      isProcessingRef.current = false;
+      setIsProcessing(false);
+      stopSpeaking();
+      setDetectedObjects([]);
+      setDetectionTimestamp(null);
+      setActivePerceptionPrompt(null);
+      targetWasVisibleRef.current = false;
+
+      if (currentGoalRef.current && currentGoalRef.current.state === 'active') {
+        setCurrentGoal((prev) =>
+          prev ? { ...prev, state: 'need_observation', updatedAt: Date.now() } : null
+        );
+      }
+
+      // Release previous mobile stream cleanly when leaving mobile camera
+      if (settingsRef.current.cameraSource === 'browser_camera') {
+        cameraRef.current?.stopBrowserCamera();
+      }
+
+      updateSettings({ ...settingsRef.current, cameraSource: nextSource });
+
+      if (!wasActive) {
+        setIsSwitchingSource(false);
+        isSwitchingSourceRef.current = false;
+        if (nextSource === 'esp32_camera' && !activeDeviceRef.current?.connected) {
+          setAssistantResponse(
+            'Wearable Camera selected, but no wearable is connected. Open Device Setup or switch back to Mobile Camera.'
+          );
+        } else {
+          setAssistantResponse(
+            nextSource === 'browser_camera'
+              ? 'Mobile Camera selected. Press Start Sentra when ready.'
+              : 'Wearable Camera selected and connected. Press Start Sentra when ready.'
+          );
+        }
+        return;
+      }
+
+      // Allow React props to flush before starting the new camera source
+      await new Promise((r) => setTimeout(r, 150));
+
+      if (nextSource === 'browser_camera') {
+        const ok = Boolean(await cameraRef.current?.startBrowserCamera());
+        setIsSwitchingSource(false);
+        isSwitchingSourceRef.current = false;
+        if (ok) {
+          speakAndDisplay('Switched to Mobile Camera. Ready to guide.');
+        } else {
+          const msg =
+            'Could not switch to Mobile Camera. Check browser camera permissions and try again.';
+          setLastAppError(msg);
+          speakAndDisplay(msg);
+        }
+      } else {
+        const connected = Boolean(activeDeviceRef.current?.connected);
+        setIsSwitchingSource(false);
+        isSwitchingSourceRef.current = false;
+        if (connected) {
+          speakAndDisplay('Switched to Wearable Camera. Observing from wearable feed.');
+        } else {
+          const msg =
+            'Wearable camera is not connected. Visual guidance is paused. Open Device Setup or return to Mobile Camera.';
+          setLastAppError(msg);
+          speakAndDisplay(msg);
+        }
+      }
+    },
+    [speakAndDisplay, updateSettings]
+  );
+
+  // Continuing Step-by-Step Object Finding / Task Reassessment Loop
+  const activeGoalId = currentGoal?.id ?? null;
+  const activeGoalState = currentGoal?.state ?? null;
+
+  useEffect(() => {
+    if (!sessionActive) return;
+    if (!activeGoalId || (activeGoalState !== 'active' && activeGoalState !== 'need_observation')) return;
+    if (!settings.autoContinuousFind) return;
+
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      if (cancelled) return;
+      if (!sessionActiveRef.current || isSwitchingSourceRef.current) return;
+      const goal = currentGoalRef.current;
+      if (!goal || (goal.state !== 'active' && goal.state !== 'need_observation')) return;
+      if (isProcessingRef.current || isSpeaking()) return;
+      if (!isCameraReadyRef.current) return;
+
+      await executeAnalysis(
+        'find',
+        `Continuing step-by-step guidance for "${goal.targetObject || goal.intent}". Reassess from this fresh camera view and give one calm next step.`,
+        goal.targetObject ?? null,
+        'object_query',
+        { isContinuousCheck: true }
+      );
+    }, 5500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [sessionActive, activeGoalId, activeGoalState, settings.autoContinuousFind, executeAnalysis]);
+
+  // Toggle optional Gemini Live voice session (available in Settings & Diagnostics)
   const handleToggleLiveVoice = useCallback(async () => {
     if (liveVoice.status === 'connected' || liveVoice.status === 'connecting') {
       liveVoice.disconnect();
@@ -1128,7 +1383,7 @@ export default function App() {
     [voice, liveVoice]
   );
 
-  // Spacebar push-to-talk shortcut (skips form inputs cleanly)
+  // Keyboard shortcut: Escape stops speech; Space (outside inputs) taps to talk when session active
   useEffect(() => {
     const isEditable = (el: Element | null) =>
       el != null &&
@@ -1138,441 +1393,403 @@ export default function App() {
         (el as HTMLElement).isContentEditable);
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !e.repeat && !isEditable(document.activeElement)) {
+      if (e.key === 'Escape' && isSpeaking()) {
+        stopSpeaking();
+        return;
+      }
+      if (
+        e.code === 'Space' &&
+        !e.repeat &&
+        !isEditable(document.activeElement) &&
+        document.activeElement?.tagName !== 'BUTTON' &&
+        sessionActiveRef.current
+      ) {
         e.preventDefault();
-        voice.startPushToTalk();
+        handleTapToTalk();
       }
     };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space' && !isEditable(document.activeElement)) {
-        e.preventDefault();
-        voice.stopPushToTalk();
-      }
-    };
-
     window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
-    };
-  }, [voice]);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleTapToTalk]);
 
-  // Derived header device status badge (strictly separated)
-  const wearableBadge = !activeDevice || !activeDevice.connected
-    ? {
-        label: 'No Hardware',
-        classes: 'bg-secondary text-muted-foreground border-border',
-        Icon: Radio,
-      }
-    : activeDevice.sourceMode === 'simulator'
-    ? {
-        label: 'Simulator',
-        classes: 'bg-accent/15 text-accent border-accent/40',
-        Icon: FlaskConical,
-      }
-    : {
-        label: 'Hardware Live',
-        classes: 'bg-success/15 text-success border-success/40',
-        Icon: Wifi,
-      };
-  const WearableIcon = wearableBadge.Icon;
+  const wearableConnected = Boolean(activeDevice?.connected);
+  const wearableUnavailableSelected =
+    settings.cameraSource === 'esp32_camera' && !wearableConnected;
 
-  const voiceStateMeta: Record<
-    VoiceAssistantState,
-    { label: string; classes: string; pulse?: boolean }
-  > = {
-    disabled: {
-      label: 'Voice Disabled',
-      classes: 'bg-secondary text-muted-foreground border-border',
-    },
-    starting: {
-      label: 'Starting Mic…',
-      classes: 'bg-secondary text-primary border-primary/40',
-    },
-    wake_listening: {
-      label: 'Listening for "Hey SENTRA"',
-      classes: 'bg-accent/15 text-accent border-accent/50',
-      pulse: true,
-    },
-    command_listening: {
-      label: 'Listening — Speak Now',
-      classes: 'bg-primary/20 text-primary border-primary',
-      pulse: true,
-    },
-    processing: {
-      label: 'Processing…',
-      classes: 'bg-primary/15 text-primary border-primary/50',
-    },
-    speaking: {
-      label: 'Speaking',
-      classes: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/50',
-    },
-    permission_blocked: {
-      label: 'Mic Permission Blocked',
-      classes: 'bg-destructive/15 text-destructive border-destructive/50',
-    },
-    unsupported: {
-      label: 'Voice Unsupported',
-      classes: 'bg-secondary text-muted-foreground border-border',
-    },
-    error: {
-      label: 'Microphone Error',
-      classes: 'bg-destructive/15 text-destructive border-destructive/50',
-    },
-  };
-  const currentVoiceMeta = voiceStateMeta[voice.assistantState];
+  const phaseDisplay = useMemo(
+    () =>
+      deriveUnifiedSessionPhase({
+        sessionActive,
+        isStartingSession,
+        isSwitchingSource,
+        isProcessing,
+        isSpeaking: isAudioSpeaking,
+        voiceState: voice.assistantState,
+        activeGoal: currentGoal,
+        hasBlockingError: Boolean(voice.voiceError || wearableUnavailableSelected),
+        wakeWordSupported: voice.compatibility.foregroundWakeSupported,
+      }),
+    [
+      sessionActive,
+      isStartingSession,
+      isSwitchingSource,
+      isProcessing,
+      isAudioSpeaking,
+      voice.assistantState,
+      voice.voiceError,
+      voice.compatibility.foregroundWakeSupported,
+      currentGoal,
+      wearableUnavailableSelected,
+    ]
+  );
 
-  const assistantNavItems: Array<{
-    id: SentraSection;
-    label: string;
-    mobileLabel: string;
-    Icon: React.ComponentType<{ className?: string }>;
-  }> = [
-    { id: 'assistant', label: 'Assistant', mobileLabel: 'Assistant', Icon: Mic },
-    { id: 'vision', label: `Live Vision (${detectedObjects.length})`, mobileLabel: 'Vision', Icon: Eye },
-    { id: 'finder', label: 'Object Finder', mobileLabel: 'Finder', Icon: Crosshair },
-    { id: 'spatial', label: 'Spatial Awareness', mobileLabel: 'Spatial', Icon: Compass },
-    { id: 'memory', label: `Contextual Memory (${memories.length})`, mobileLabel: 'Memory', Icon: Bookmark },
-  ];
+  const shouldShowCameraVisually =
+    activeView === 'device' || (activeView === 'assistant' && showCameraPreview);
 
-  const companionNavItems: Array<{
-    id: SentraSection;
-    label: string;
-    mobileLabel: string;
-    Icon: React.ComponentType<{ className?: string }>;
-  }> = [
-    { id: 'device', label: 'Device & Analytics', mobileLabel: 'Device', Icon: Cpu },
-    { id: 'settings', label: 'Settings & Diagnostics', mobileLabel: 'Settings', Icon: Sliders },
-  ];
-
-  const handleCameraSourceChange = (nextSource: CameraSourceType) => {
-    updateSettings({ ...settings, cameraSource: nextSource });
-    setDetectedObjects([]);
-    setDetectionTimestamp(null);
-  };
-
-  const showCameraOnMobile =
-    activeSection === 'assistant' || activeSection === 'vision' || activeSection === 'finder';
+  useEffect(() => {
+    if (cameraContainerRef.current) {
+      cameraContainerRef.current.inert = !shouldShowCameraVisually;
+    }
+  }, [shouldShowCameraVisually]);
 
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-3 sm:gap-4 px-3.5 sm:px-5 safe-top pb-24 md:pb-6 text-foreground selection:bg-primary/20">
-      {/* Top Header */}
-      <header className="flex flex-wrap items-center justify-between gap-2.5 border-b border-border pb-3">
-        <div>
-          <h1 className="text-xl sm:text-3xl font-extrabold tracking-widest text-primary">
-            SENTRA
-          </h1>
-          <p className="text-[11px] sm:text-xs text-muted-foreground">
-            Voice-First Assistive Companion
-          </p>
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5 sm:gap-2 text-xs font-bold font-mono">
-          {/* Wearable Connection Status */}
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 ${wearableBadge.classes}`}
-          >
-            <WearableIcon className="h-3.5 w-3.5" />
-            <span className="hidden xs:inline">{wearableBadge.label}</span>
-            <span className="xs:hidden">{wearableBadge.label === 'No Hardware' ? 'No HW' : wearableBadge.label}</span>
-          </span>
-
-          {/* Clear AI Visual Analysis Status Badge */}
-          <span
-            className={`inline-flex items-center gap-1.5 rounded-lg border px-2 py-1.5 ${
-              !isOnline
-                ? 'bg-amber-500/15 text-amber-300 border-amber-500/50'
-                : isLocalAssistActive
-                ? 'bg-primary/15 text-primary border-primary/40'
-                : 'bg-secondary text-foreground border-border'
-            }`}
-          >
-            {!isOnline ? (
-              <WifiOff className="h-3.5 w-3.5 text-amber-400" />
-            ) : isLocalAssistActive ? (
-              <Cpu className="h-3.5 w-3.5" />
-            ) : (
-              <Sparkles className="h-3.5 w-3.5 text-primary" />
-            )}
-            <span>
-              {!isOnline
-                ? 'Offline'
-                : isLocalAssistActive
-                ? 'Local Analysis'
-                : 'AI Visual Analysis'}
-            </span>
-          </span>
-
-          {/* Quick Mute / Unmute Button */}
-          <button
-            type="button"
-            onClick={() => updateSettings({ ...settings, voiceMuted: !settings.voiceMuted })}
-            className={`inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg border px-2 py-1.5 transition-colors ${
-              settings.voiceMuted
-                ? 'bg-destructive/15 text-destructive border-destructive/40'
-                : 'bg-secondary text-foreground border-border hover:border-primary'
-            }`}
-            aria-label={settings.voiceMuted ? 'Unmute SENTRA audio' : 'Mute SENTRA audio'}
-            title={settings.voiceMuted ? 'Unmute SENTRA audio' : 'Mute SENTRA audio'}
-          >
-            {settings.voiceMuted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4 text-primary" />}
-          </button>
-
-          {/* Firebase Google Sign-In / Signed-In Account Badge */}
-          {firebase.user ? (
-            <button
-              type="button"
-              onClick={firebase.signOut}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-success/40 bg-success/10 px-2.5 py-1.5 text-success hover:bg-success/20 transition-colors"
-              title={`Signed in as ${firebase.user.email || firebase.user.displayName}. Click to sign out.`}
-            >
-              <UserIcon className="h-3.5 w-3.5 shrink-0" />
-              <span className="max-w-[110px] truncate">
-                {firebase.user.displayName?.split(' ')[0] || firebase.user.email?.split('@')[0] || 'Account'}
-              </span>
-              <LogOut className="h-3 w-3 opacity-80" />
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={firebase.signIn}
-              disabled={!firebase.authReady}
-              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-primary/50 bg-primary/15 px-2.5 py-1.5 text-primary hover:bg-primary/25 transition-colors disabled:opacity-50"
-            >
-              <LogIn className="h-3.5 w-3.5" />
-              <span>Sign In</span>
-            </button>
-          )}
-
-          <PWAInstallButton compact />
-        </div>
-      </header>
-
-      <OfflineIndicator />
-
-      {/* Desktop Navigation Clearly Separating AI Assistant vs Wearable Companion */}
-      <nav
-        aria-label="Primary Sections"
-        className="hidden md:flex flex-wrap items-center justify-between gap-2 text-xs font-bold"
+    <div className="min-h-screen bg-background text-foreground selection:bg-primary/25">
+      <a
+        href="#main-content"
+        className="sr-only focus:not-sr-only focus:fixed focus:top-3 focus:left-3 focus:z-50 focus:rounded-xl focus:bg-primary focus:px-4 focus:py-2 focus:text-sm focus:font-bold focus:text-primary-foreground"
       >
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground pr-1 shrink-0">
-            Assistant
-          </span>
-          {assistantNavItems.map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setActiveSection(id)}
-              className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg shrink-0 transition-colors border ${
-                activeSection === id
-                  ? 'bg-primary text-primary-foreground border-primary'
-                  : 'bg-secondary text-muted-foreground border-border/60 hover:text-foreground hover:bg-card'
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
+        Skip to main assistant
+      </a>
 
-        <div className="flex items-center gap-1.5 py-0.5">
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground pr-1 shrink-0">
-            Wearable
-          </span>
-          {companionNavItems.map(({ id, label, Icon }) => (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setActiveSection(id)}
-              className={`flex items-center gap-1.5 px-3 py-2.5 rounded-lg shrink-0 transition-colors border ${
-                activeSection === id
-                  ? 'bg-accent text-accent-foreground border-accent'
-                  : 'bg-secondary text-muted-foreground border-border/60 hover:text-foreground hover:bg-card'
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5" />
-              <span>{label}</span>
-            </button>
-          ))}
-        </div>
-      </nav>
+      <div
+        className={`mx-auto flex min-h-screen flex-col gap-5 px-4 sm:px-6 safe-top pb-8 transition-[max-width] duration-200 ${
+          activeView === 'assistant' ? 'max-w-[520px]' : 'max-w-4xl'
+        }`}
+      >
+        {/* TOP AREA: Matches Visual Reference Exactly */}
+        <header className="space-y-4">
+          {/* Row 1: Brand Left + Sign In / Account Right */}
+          <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-4">
+            <div className="min-w-0">
+              <h1 className="text-[26px] sm:text-[28px] font-extrabold tracking-wide text-primary leading-none">
+                SENTRA
+              </h1>
+              <p className="mt-1 text-xs sm:text-sm text-muted-foreground">
+                Voice-First Assistive Companion
+              </p>
+            </div>
 
-      {/* Main Two-Column Responsive Layout */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start flex-1">
-        {/* Left Column: Persistent CameraView (stays mounted on mobile across tab switches so stream never drops) */}
-        <div className={`lg:col-span-5 space-y-3 ${showCameraOnMobile ? 'block' : 'hidden lg:block'}`}>
-          <CameraView
-            ref={cameraRef}
-            cameraSource={settings.cameraSource}
-            onChangeCameraSource={handleCameraSourceChange}
-            findingGoal={currentGoal?.targetObject || null}
-            onStopFinding={() => setCurrentGoal(null)}
-            facingMode={settings.cameraFacing}
-            onToggleFacingMode={() => {
-              const next = settings.cameraFacing === 'environment' ? 'user' : 'environment';
-              updateSettings({ ...settings, cameraFacing: next, selectedCameraDeviceId: null });
-            }}
-            selectedDeviceId={settings.selectedCameraDeviceId}
-            onSelectDeviceId={(id) => updateSettings({ ...settings, selectedCameraDeviceId: id })}
-            wearableDeviceId={settings.selectedWearableDeviceId}
-            detectedObjects={detectedObjects}
-            detectionTimestamp={detectionTimestamp}
-            detectionStale={detectionStale}
-            hazard={activeHazard}
-            activePerceptionPrompt={activePerceptionPrompt}
-            onCameraActiveChange={setIsCameraReady}
-          />
-
-          {/* Compact Telemetry Summary Strip below Camera */}
-          <div className="rounded-xl bg-card border border-border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-mono">
-            <span className="text-muted-foreground">
-              Forward ToF:{' '}
-              <strong className="text-foreground tabular-nums">
-                {activeDevice?.connected && activeDevice.sensors.forwardDistanceCm != null
-                  ? `${activeDevice.sensors.forwardDistanceCm} cm`
-                  : '—'}
-              </strong>
-            </span>
-            <span className="text-muted-foreground">
-              Downward:{' '}
-              <strong className="text-foreground tabular-nums">
-                {activeDevice?.connected && activeDevice.sensors.downwardDistanceMm != null
-                  ? `${activeDevice.sensors.downwardDistanceMm} mm`
-                  : '—'}
-              </strong>
-            </span>
-            <span className="text-muted-foreground">
-              Stream:{' '}
-              <strong className={sseConnected ? 'text-success' : 'text-muted-foreground'}>
-                {sseConnected ? 'SSE Live' : 'Polling'}
-              </strong>
-            </span>
-          </div>
-        </div>
-
-        {/* Right Column: Active Section Content */}
-        <div className="lg:col-span-7 space-y-3">
-          {activeSection === 'assistant' && (
-            <div className="space-y-3">
-              {/* Clear Voice Assistant State & Hands-Free Status Bar */}
-              <div className="rounded-xl bg-card border border-border p-3 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-bold ${currentVoiceMeta.classes}`}
-                    >
-                      <span
-                        className={`h-2 w-2 rounded-full ${
-                          currentVoiceMeta.pulse
-                            ? 'bg-current animate-ping'
-                            : voice.assistantState === 'error' ||
-                              voice.assistantState === 'permission_blocked'
-                            ? 'bg-destructive'
-                            : 'bg-current opacity-60'
-                        }`}
-                      />
-                      <span>{currentVoiceMeta.label}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              {firebase.user ? (
+                <div className="flex items-center gap-2">
+                  <span className="hidden min-[400px]:inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-border bg-card px-3 text-xs font-semibold text-foreground">
+                    <UserIcon className="h-4 w-4 text-primary shrink-0" aria-hidden="true" />
+                    <span className="max-w-[110px] truncate">
+                      {firebase.user.displayName?.split(' ')[0] ||
+                        firebase.user.email?.split('@')[0] ||
+                        'Account'}
                     </span>
-
-                    {voice.wakeActivatedNotice && (
-                      <span className="text-xs font-bold text-primary animate-pulse">
-                        "Hey SENTRA" detected
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {isAudioSpeaking && (
-                      <button
-                        type="button"
-                        onClick={stopSpeaking}
-                        className="inline-flex min-h-[38px] items-center gap-1.5 rounded-lg bg-destructive px-3 py-1.5 text-xs font-bold text-destructive-foreground"
-                      >
-                        <VolumeX className="h-3.5 w-3.5" />
-                        <span>Stop Speaking</span>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => handleToggleWakeWord(!settings.wakeWordEnabled)}
-                      disabled={!voice.compatibility.speechRecognitionSupported}
-                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-colors disabled:opacity-40 ${
-                        settings.wakeWordEnabled
-                          ? 'bg-primary text-primary-foreground border-primary'
-                          : 'bg-secondary text-foreground border-border hover:border-primary'
-                      }`}
-                    >
-                      {settings.wakeWordEnabled ? (
-                        <Mic className="h-3.5 w-3.5" />
-                      ) : (
-                        <MicOff className="h-3.5 w-3.5" />
-                      )}
-                      <span>
-                        {settings.wakeWordEnabled ? 'Hey SENTRA: ON' : 'Enable "Hey SENTRA"'}
-                      </span>
-                    </button>
-                  </div>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={firebase.signOut}
+                    aria-label="Sign out of your account"
+                    className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-primary/50 bg-[#252010] px-4 text-xs sm:text-sm font-semibold text-primary transition-colors hover:bg-primary hover:text-primary-foreground whitespace-nowrap"
+                  >
+                    <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span>Sign Out</span>
+                  </button>
                 </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={firebase.signIn}
+                  disabled={!firebase.authReady}
+                  className="inline-flex min-h-[44px] items-center justify-center rounded-xl border border-primary/60 bg-[#252010] px-5 text-sm font-semibold text-primary transition-colors hover:bg-primary hover:text-primary-foreground disabled:opacity-50 whitespace-nowrap"
+                >
+                  Sign In
+                </button>
+              )}
+            </div>
+          </div>
 
-                {voice.liveTranscript && (
-                  <p className="text-xs font-mono text-primary bg-primary/10 border border-primary/30 rounded-lg px-2.5 py-1.5">
-                    Hearing: "{voice.liveTranscript}"
-                  </p>
-                )}
+          {/* Row 2: WEARABLE Section (2 equal dark cards matching reference) */}
+          <nav aria-label="Wearable tools" className="space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold tracking-[0.14em] text-muted-foreground uppercase">
+                WEARABLE
+              </span>
+              {activeView !== 'assistant' && (
+                <button
+                  type="button"
+                  onClick={() => setActiveView('assistant')}
+                  className="inline-flex min-h-[44px] items-center gap-1.5 rounded-xl border border-primary/60 bg-[#252010] px-3.5 text-xs font-semibold text-primary hover:bg-primary hover:text-primary-foreground whitespace-nowrap"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  <span>Back to Assistant</span>
+                </button>
+              )}
+            </div>
 
-                {voice.voiceError && (
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-destructive/15 border border-destructive/40 px-3 py-2 text-xs text-destructive">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <AlertTriangle className="h-4 w-4 shrink-0" />
-                      <span className="break-words">{voice.voiceError}</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={voice.restartMicrophone}
-                      className="inline-flex min-h-[34px] items-center gap-1 rounded-lg bg-destructive px-2.5 py-1 text-xs font-bold text-destructive-foreground shrink-0"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                      <span>Restart Mic</span>
-                    </button>
-                  </div>
-                )}
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => setActiveView(activeView === 'device' ? 'assistant' : 'device')}
+                aria-current={activeView === 'device' ? 'page' : undefined}
+                className={`min-h-[52px] rounded-xl border px-4 py-3 text-left text-xs sm:text-sm font-semibold transition-colors ${
+                  activeView === 'device'
+                    ? 'border-primary bg-[#1C2128] text-primary'
+                    : 'border-border bg-card text-foreground hover:border-primary/70 hover:bg-secondary'
+                }`}
+              >
+                Device &amp; Analytics
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveView(activeView === 'settings' ? 'assistant' : 'settings')}
+                aria-current={activeView === 'settings' ? 'page' : undefined}
+                className={`min-h-[52px] rounded-xl border px-4 py-3 text-left text-xs sm:text-sm font-semibold transition-colors ${
+                  activeView === 'settings'
+                    ? 'border-primary bg-[#1C2128] text-primary'
+                    : 'border-border bg-card text-foreground hover:border-primary/70 hover:bg-secondary'
+                }`}
+              >
+                Settings &amp; Diagnostics
+              </button>
+            </div>
+          </nav>
 
-                <p className="text-[11px] text-muted-foreground">
-                  {settings.wakeWordEnabled
-                    ? 'Say "Hey SENTRA" followed by your question while this tab is open. Say "Stop" or "Be quiet" to interrupt.'
-                    : 'Camera preview stays on your device. Gemini AI analyzes a snapshot only when you ask a visual question or enable Watch.'}
+          {/* Row 3: Prominent Two-Option Camera Source Switch */}
+          <div className="space-y-2">
+            <div
+              role="radiogroup"
+              aria-label="Camera source"
+              className="grid grid-cols-2 gap-1.5 rounded-2xl border border-border bg-card p-1.5"
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={settings.cameraSource === 'browser_camera'}
+                disabled={isSwitchingSource}
+                onClick={() => handleCameraSourceChange('browser_camera')}
+                className={`min-h-[48px] rounded-xl px-4 py-2.5 text-left text-sm font-bold transition-colors ${
+                  settings.cameraSource === 'browser_camera'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-transparent text-muted-foreground font-semibold hover:bg-secondary hover:text-foreground'
+                }`}
+              >
+                Mobile Camera
+              </button>
+              <button
+                type="button"
+                role="radio"
+                aria-checked={settings.cameraSource === 'esp32_camera'}
+                disabled={isSwitchingSource}
+                onClick={() => handleCameraSourceChange('esp32_camera')}
+                className={`min-h-[48px] rounded-xl px-4 py-2.5 text-left text-sm font-bold transition-colors ${
+                  settings.cameraSource === 'esp32_camera'
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-transparent text-muted-foreground font-semibold hover:bg-secondary hover:text-foreground'
+                }`}
+              >
+                Wearable Camera
+              </button>
+            </div>
+
+            <p className="px-0.5 text-xs sm:text-sm text-muted-foreground">
+              {settings.cameraSource === 'esp32_camera' ? (
+                wearableConnected ? (
+                  <>
+                    Using wearable camera ({activeDevice?.sourceMode === 'simulator' ? 'Simulator' : activeDevice?.deviceId})
+                  </>
+                ) : (
+                  <span className="font-semibold text-foreground">Wearable not connected</span>
+                )
+              ) : (
+                'Using your phone camera'
+              )}
+            </p>
+          </div>
+
+          {/* Honest Action Banner When Wearable Camera Is Selected While Disconnected */}
+          {wearableUnavailableSelected && (
+            <div
+              role="status"
+              className="space-y-2.5 rounded-2xl border border-border bg-card px-4 py-3.5 text-sm"
+            >
+              <div className="flex items-start gap-2.5">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                <p className="text-foreground">
+                  <strong>Wearable not connected.</strong> Connect your wearable in Device Setup or return to Mobile Camera.
                 </p>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleCameraSourceChange('browser_camera')}
+                  className="min-h-[44px] rounded-xl bg-primary px-3.5 text-xs font-bold text-primary-foreground whitespace-nowrap"
+                >
+                  Return to Mobile Camera
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveView('device')}
+                  className="min-h-[44px] rounded-xl border border-border bg-secondary px-3.5 text-xs font-semibold text-foreground hover:border-primary whitespace-nowrap"
+                >
+                  Device Setup
+                </button>
+              </div>
+            </div>
+          )}
+        </header>
 
-              {/* Real-Time Two-Way Gemini 3.8 Live Conversation Bar */}
-              <div className="rounded-xl bg-card border border-primary/40 p-3 space-y-2.5">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+        <OfflineIndicator />
+
+        {/* MAIN CONTENT AREA */}
+        <main id="main-content" className="flex-1 space-y-5">
+          {/* Single Conversational Assistant Home Screen */}
+          {activeView === 'assistant' && (
+            <AssistantHomeView
+              sessionActive={sessionActive}
+              isStartingSession={isStartingSession}
+              isSwitchingSource={isSwitchingSource}
+              phaseDisplay={phaseDisplay}
+              cameraSource={settings.cameraSource}
+              isCameraReady={isCameraReady}
+              wearableConnected={wearableConnected}
+              wakeWordEnabled={settings.wakeWordEnabled}
+              wakeWordSupported={voice.compatibility.foregroundWakeSupported}
+              wakeLimitationNote={voice.compatibility.limitationNote}
+              liveTranscript={voice.liveTranscript}
+              spokenTranscript={spokenTranscript}
+              assistantResponse={assistantResponse}
+              hasConversationActivity={Boolean(
+                spokenTranscript || assistantResponse !== INITIAL_ASSISTANT_MESSAGE
+              )}
+              isProcessing={isProcessing}
+              isSpeaking={isAudioSpeaking}
+              voiceMuted={settings.voiceMuted}
+              onToggleMute={() => updateSettings({ ...settings, voiceMuted: !settings.voiceMuted })}
+              voiceError={voice.voiceError}
+              lastError={lastAppError}
+              isOnline={isOnline}
+              activeGoal={currentGoal}
+              activeHazard={activeHazard}
+              typedQuery={typedQuery}
+              onTypedQueryChange={setTypedQuery}
+              onSubmitTypedQuery={handleUserQuery}
+              onStartSession={startSentraSession}
+              onStopSession={stopSentraSession}
+              onTapToTalk={handleTapToTalk}
+              onRepeat={handleRepeat}
+              onStopSpeaking={stopSpeaking}
+              onCancelTask={handleCancelTask}
+              onDismissHazard={() => setActiveHazard(null)}
+              onRetryMic={voice.restartMicrophone}
+              onSwitchToMobileCamera={() => handleCameraSourceChange('browser_camera')}
+              onOpenDeviceSetup={() => setActiveView('device')}
+              showCameraPreview={showCameraPreview}
+              onToggleCameraPreview={() => setShowCameraPreview((v) => !v)}
+            />
+          )}
+
+          {/* Persistent CameraView (stays mounted & decoding frames cleanly without display:none; visible when preview toggled or inside Device & Analytics) */}
+          <div
+            ref={cameraContainerRef}
+            className={
+              shouldShowCameraVisually
+                ? 'mx-auto w-full max-w-3xl'
+                : 'pointer-events-none fixed -left-[9999px] top-0 h-px w-px overflow-hidden opacity-0'
+            }
+            aria-hidden={!shouldShowCameraVisually}
+          >
+            <CameraView
+              ref={cameraRef}
+              cameraSource={settings.cameraSource}
+              onChangeCameraSource={handleCameraSourceChange}
+              findingGoal={currentGoal?.targetObject || null}
+              onStopFinding={handleCancelTask}
+              facingMode={settings.cameraFacing}
+              onToggleFacingMode={() => {
+                const next = settings.cameraFacing === 'environment' ? 'user' : 'environment';
+                updateSettings({ ...settings, cameraFacing: next, selectedCameraDeviceId: null });
+              }}
+              selectedDeviceId={settings.selectedCameraDeviceId}
+              onSelectDeviceId={(id) => updateSettings({ ...settings, selectedCameraDeviceId: id })}
+              wearableDeviceId={settings.selectedWearableDeviceId}
+              detectedObjects={detectedObjects}
+              detectionTimestamp={detectionTimestamp}
+              detectionStale={detectionStale}
+              hazard={activeHazard}
+              activePerceptionPrompt={activePerceptionPrompt}
+              onCameraActiveChange={setIsCameraReady}
+            />
+          </div>
+
+          {/* Secondary View 1: Device & Analytics (Preserved Wearable Telemetry, Vision Details & Spatial Context) */}
+          {activeView === 'device' && (
+            <div className="space-y-5">
+              <DeviceStatusView
+                devices={devices}
+                activeDevice={activeDevice}
+                selectedDeviceId={settings.selectedWearableDeviceId}
+                onSelectDeviceId={(id) => updateSettings({ ...settings, selectedWearableDeviceId: id })}
+                sseConnected={sseConnected}
+                telemetryError={telemetryError}
+                analytics={analytics}
+                analyticsRange={analyticsRange}
+                onChangeAnalyticsRange={setAnalyticsRange}
+                includeSimulatedAnalytics={includeSimulatedAnalytics}
+                onToggleIncludeSimulated={setIncludeSimulatedAnalytics}
+                onRefreshAnalytics={() => refreshAnalytics(null)}
+                audioOwnership={audioOwnership}
+                onChangeAudioOwnership={handleAudioOwnershipChange}
+              />
+
+              <LiveVisionView
+                detectedObjects={detectedObjects}
+                sceneDescription={sceneDescription}
+                pathStatus={effectivePathStatus}
+                detectionTimestamp={detectionTimestamp}
+                detectionStale={detectionStale}
+                hazard={activeHazard}
+                onSelectObject={(obj) => {
+                  const msg = `${obj.label}, at your ${obj.clockPosition}, ${obj.relativeDistance.replace('_', ' ')}`;
+                  speakAndDisplay(msg);
+                }}
+              />
+
+              <SpatialWorldView
+                heading={cameraRef.current?.heading ?? activeDevice?.sensors.imu?.heading ?? null}
+                landmarks={landmarks}
+                relationships={relationships}
+                detectedObjects={detectedObjects}
+                currentRoom={currentRoom}
+              />
+            </div>
+          )}
+
+          {/* Secondary View 2: Settings & Diagnostics (Preserved Diagnostics, Memory Management & Optional Live Voice Call) */}
+          {activeView === 'settings' && (
+            <div className="space-y-5">
+              {/* Optional Full-Duplex Gemini Live Call Controls */}
+              <section className="rounded-2xl border border-border bg-card p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
                   <div className="space-y-0.5">
-                    <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-primary">
-                      <PhoneCall className="h-4 w-4" />
-                      <span>Real-Time Voice Conversation ({liveVoice.modelUsed})</span>
-                      {liveVoice.status === 'connected' && (
-                        <span className="inline-flex items-center gap-1 rounded bg-success/15 border border-success/40 px-1.5 py-0.5 text-[10px] font-mono text-success">
-                          {liveVoice.isModelSpeaking ? 'SPEAKING' : 'LIVE MIC'}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-muted-foreground">
-                      Full-duplex 16kHz/24kHz audio + live {settings.cameraSource === 'esp32_camera' ? 'OV2640 & VL53L0X hardware stream' : 'camera & sensor context'}.
+                    <h2 className="text-sm font-bold text-foreground">
+                      Continuous Live Audio Call ({liveVoice.modelUsed})
+                    </h2>
+                    <p className="text-xs text-muted-foreground">
+                      Optional full-duplex audio bridge with server-side wearable tools.
                     </p>
                   </div>
-
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <select
                       aria-label="Live voice persona"
                       value={liveVoicePersona}
                       onChange={(e) => setLiveVoicePersona(e.target.value as LiveVoiceName)}
                       disabled={liveVoice.status === 'connected' || liveVoice.status === 'connecting'}
-                      className="rounded-lg bg-secondary border border-border px-2 py-1.5 text-xs font-mono text-foreground disabled:opacity-50"
+                      className="min-h-[44px] rounded-xl border border-border bg-secondary px-3 text-xs font-semibold text-foreground disabled:opacity-50"
                     >
                       {(['Zephyr', 'Puck', 'Charon', 'Kore', 'Fenrir'] as const).map((v) => (
                         <option key={v} value={v}>
@@ -1580,576 +1797,81 @@ export default function App() {
                         </option>
                       ))}
                     </select>
-
                     <button
                       type="button"
                       onClick={handleToggleLiveVoice}
-                      className={`inline-flex min-h-[38px] items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-bold border transition-colors ${
+                      className={`inline-flex min-h-[44px] items-center gap-2 rounded-xl border px-4 text-xs font-bold transition-colors ${
                         liveVoice.status === 'connected' || liveVoice.status === 'connecting'
-                          ? 'bg-destructive text-destructive-foreground border-destructive'
-                          : 'bg-primary text-primary-foreground border-primary hover:brightness-110'
+                          ? 'border-destructive bg-destructive text-destructive-foreground'
+                          : 'border-primary bg-primary text-primary-foreground'
                       }`}
                     >
                       {liveVoice.status === 'connected' || liveVoice.status === 'connecting' ? (
                         <>
-                          <PhoneOff className="h-3.5 w-3.5" />
+                          <PhoneOff className="h-4 w-4" aria-hidden="true" />
                           <span>{liveVoice.status === 'connecting' ? 'Connecting…' : 'End Live Call'}</span>
                         </>
                       ) : (
                         <>
-                          <PhoneCall className="h-3.5 w-3.5" />
-                          <span>Start Live Voice</span>
+                          <PhoneCall className="h-4 w-4" aria-hidden="true" />
+                          <span>Start Live Call</span>
                         </>
                       )}
                     </button>
                   </div>
                 </div>
-
                 {liveVoice.error && (
-                  <p className="rounded-lg bg-destructive/15 border border-destructive/40 px-2.5 py-1.5 text-xs font-mono text-destructive">
+                  <p className="rounded-xl border border-destructive/60 bg-destructive/15 px-3 py-2 text-xs text-foreground">
                     {liveVoice.error}
                   </p>
                 )}
-
-                {liveVoice.status === 'connected' && (
-                  <div className="rounded-lg bg-secondary/70 border border-border p-2.5 space-y-1 text-xs">
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] font-mono text-muted-foreground">
-                      <span>
-                        Hardware Link:{' '}
-                        <strong className={liveVoice.hardwareLinked ? 'text-success' : 'text-foreground'}>
-                          {liveVoice.hardwareLinked ? `${settings.selectedWearableDeviceId} Connected` : 'Standby'}
-                        </strong>
-                      </span>
-                      <span>
-                        Firestore Log: {firebase.user ? 'Auto-syncing turns' : 'Sign in to save history'}
-                      </span>
-                    </div>
-                    {liveVoice.userTranscript && (
-                      <p className="text-foreground">
-                        <span className="font-bold text-primary">You:</span> {liveVoice.userTranscript}
-                      </p>
-                    )}
-                    {liveVoice.assistantTranscript && (
-                      <p className="text-foreground">
-                        <span className="font-bold text-accent">SENTRA:</span> {liveVoice.assistantTranscript}
-                      </p>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Spoken Response & Transcript Card */}
-              <section
-                aria-live="polite"
-                className="relative flex min-h-[6.5rem] flex-col justify-center rounded-xl bg-card border border-border p-4"
-              >
-                {spokenTranscript && (
-                  <p className="mb-1 text-sm font-semibold text-muted-foreground pr-20">
-                    You: <span className="text-foreground">"{spokenTranscript}"</span>
-                  </p>
-                )}
-
-                <p className="text-base sm:text-xl font-bold leading-relaxed text-foreground select-text pr-20">
-                  {isProcessing ? (
-                    <span className="flex items-center gap-2 text-primary">
-                      <Eye className="h-5 w-5" />
-                      <span>Observing and reasoning…</span>
-                    </span>
-                  ) : (
-                    assistantResponse
-                  )}
-                </p>
-
-                {!isProcessing && assistantResponse && (
-                  <div className="absolute right-3 top-3 flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => speakText(assistantResponse, settings.speechRate)}
-                      className="min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-lg p-2 text-muted-foreground hover:text-primary hover:bg-secondary transition-colors"
-                      aria-label="Replay spoken response"
-                      title="Speak again"
-                    >
-                      <RotateCcw className="h-4 w-4" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={stopSpeaking}
-                      className="min-h-[40px] min-w-[40px] inline-flex items-center justify-center rounded-lg p-2 text-muted-foreground hover:text-destructive hover:bg-secondary transition-colors"
-                      aria-label="Silence speech output"
-                      title="Stop speaking"
-                    >
-                      <VolumeX className="h-4 w-4" />
-                    </button>
-                  </div>
-                )}
               </section>
 
-              {/* Reach Guidance Card (when target is in arm's reach) */}
-              {reachGuidance && reachGuidance.active && (
-                <div className="rounded-xl bg-emerald-950/40 border border-emerald-500/70 p-3.5 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-500/20 text-emerald-400 border border-emerald-500/50">
-                      <Crosshair className="h-5 w-5" />
-                    </div>
-                    <div>
-                      <div className="text-xs font-bold uppercase tracking-wider text-emerald-400">
-                        Reach Guidance · {reachGuidance.clockPosition}
-                      </div>
-                      <p className="text-base font-bold text-emerald-100">
-                        {reachGuidance.handInstruction}
-                      </p>
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => speakText(reachGuidance.handInstruction, settings.speechRate)}
-                    className="min-h-[40px] rounded-lg bg-emerald-500/20 px-3 py-2 text-xs font-bold text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/40 shrink-0"
-                  >
-                    Repeat
-                  </button>
-                </div>
-              )}
-
-              {/* Primary Voice Controls: Large Hold-to-Talk + Tap-to-Ask Command Window */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                <button
-                  type="button"
-                  onPointerDown={voice.startPushToTalk}
-                  onPointerUp={voice.stopPushToTalk}
-                  onPointerCancel={voice.stopPushToTalk}
-                  onPointerLeave={() => voice.listenMode === 'ptt' && voice.stopPushToTalk()}
-                  disabled={isProcessing}
-                  className={`sm:col-span-2 flex h-20 sm:h-24 w-full select-none items-center justify-center gap-3 rounded-2xl bg-primary text-xl sm:text-2xl font-extrabold text-primary-foreground shadow-lg transition-transform active:scale-[0.98] disabled:opacity-60 ${
-                    voice.listenMode === 'ptt' ? 'sentra-listening ring-4 ring-primary/40' : 'hover:brightness-105'
-                  }`}
-                  aria-label="Hold to talk to SENTRA (or hold Spacebar)"
-                >
-                  <Mic className={`h-7 w-7 ${voice.listenMode === 'ptt' ? 'animate-bounce' : ''}`} />
-                  <span>
-                    {voice.listenMode === 'ptt'
-                      ? 'Release to Send…'
-                      : isProcessing
-                      ? 'Analyzing…'
-                      : 'Hold to Talk'}
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={voice.activateCommandWindow}
-                  disabled={isProcessing}
-                  className={`flex min-h-[60px] sm:h-24 w-full items-center justify-center gap-2 rounded-2xl border px-4 text-sm sm:text-base font-bold transition-colors disabled:opacity-60 ${
-                    voice.listenMode === 'command'
-                      ? 'bg-accent text-accent-foreground border-accent ring-2 ring-accent/40'
-                      : 'bg-secondary text-foreground border-border hover:border-primary'
-                  }`}
-                >
-                  <Mic className="h-5 w-5 shrink-0" />
-                  <span>{voice.listenMode === 'command' ? 'Speak Query…' : 'Tap to Ask'}</span>
-                </button>
-              </div>
-
-              {/* Continuous Watch Mode Toggle */}
-              <div className="flex items-center justify-between gap-3 rounded-xl bg-card border border-border p-3.5">
-                <div className="flex items-center gap-3">
-                  <div
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${
-                      settings.continuousWatchMode
-                        ? 'bg-primary/20 text-primary border-primary/50'
-                        : 'bg-secondary text-muted-foreground border-border'
-                    }`}
-                  >
-                    <Radio className="h-4 w-4" />
-                  </div>
-                  <div>
-                    <div className="font-bold text-sm text-foreground">
-                      Continuous Watch Mode
-                    </div>
-                    <p className="text-xs text-muted-foreground">
-                      Periodic AI Visual Analysis snapshots every 7s while camera streams
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !settings.continuousWatchMode;
-                    updateSettings({ ...settings, continuousWatchMode: next });
-                    speakText(
-                      next ? 'Continuous watch mode activated.' : 'Continuous watch mode paused.',
-                      settings.speechRate
-                    );
-                  }}
-                  className={`min-h-[42px] rounded-lg px-3.5 py-2 font-bold text-xs border transition-colors shrink-0 ${
-                    settings.continuousWatchMode
-                      ? 'bg-destructive/15 text-destructive border-destructive/40 hover:bg-destructive/25'
-                      : 'bg-primary text-primary-foreground border-primary hover:brightness-110'
-                  }`}
-                >
-                  {settings.continuousWatchMode ? 'Pause Watch' : 'Enable Watch'}
-                </button>
-              </div>
-
-              {/* Quick Voice Mode Actions */}
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => executeAnalysis('describe', '', null, 'scene_analysis')}
-                  disabled={isProcessing}
-                  className="flex min-h-[52px] items-center justify-center gap-2 rounded-xl bg-secondary p-3.5 text-sm sm:text-base font-bold border border-border hover:bg-card transition-colors disabled:opacity-60"
-                >
-                  <Eye className="h-5 w-5 text-primary shrink-0" />
-                  <span>Describe Scene</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setShowQuickFindInput((v) => !v)}
-                  disabled={isProcessing}
-                  className="flex min-h-[52px] items-center justify-center gap-2 rounded-xl bg-secondary p-3.5 text-sm sm:text-base font-bold border border-border hover:bg-card transition-colors disabled:opacity-60"
-                >
-                  <Crosshair className="h-5 w-5 text-accent shrink-0" />
-                  <span>Find Object</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => executeAnalysis('read', 'Read any visible text', null, 'scene_analysis')}
-                  disabled={isProcessing}
-                  className="flex min-h-[52px] items-center justify-center gap-2 rounded-xl bg-secondary p-3.5 text-sm sm:text-base font-bold border border-border hover:bg-card transition-colors disabled:opacity-60"
-                >
-                  <Layers className="h-5 w-5 text-emerald-400 shrink-0" />
-                  <span>Read Text</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() =>
-                    executeAnalysis(
-                      'remember',
-                      'Remember the main objects and landmarks visible here',
-                      null,
-                      'scene_analysis'
-                    )
-                  }
-                  disabled={isProcessing}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-secondary p-3.5 text-base font-bold border border-border hover:bg-card transition-colors disabled:opacity-60"
-                >
-                  <Bookmark className="h-5 w-5 text-primary" />
-                  <span>Remember Spot</span>
-                </button>
-              </div>
-
-              {/* Inline Quick Find Input (replaces window.prompt) */}
-              {showQuickFindInput && (
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (quickFindValue.trim()) {
-                      handleUserQuery(`Find ${quickFindValue.trim()}`);
-                      setQuickFindValue('');
-                      setShowQuickFindInput(false);
-                    }
-                  }}
-                  className="flex gap-2 rounded-xl bg-card border border-primary/50 p-2.5"
-                >
-                  <input
-                    type="text"
-                    value={quickFindValue}
-                    onChange={(e) => setQuickFindValue(e.target.value)}
-                    placeholder="Object to find (e.g., water bottle, keys)..."
-                    className="flex-1 rounded-lg bg-secondary px-3 py-2 text-sm text-foreground border border-border focus:border-primary focus:outline-none"
-                    autoFocus
-                  />
-                  <button
-                    type="submit"
-                    className="rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground"
-                  >
-                    Locate
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowQuickFindInput(false)}
-                    aria-label="Close find input"
-                    className="rounded-lg bg-secondary p-2 text-muted-foreground hover:text-foreground"
-                  >
-                    <X className="h-4 w-4" />
-                  </button>
-                </form>
-              )}
-
-              {/* Active Hazard Banner */}
-              {activeHazard && (
-                <div className="rounded-xl bg-destructive/15 border border-destructive/60 p-3 flex items-center justify-between gap-2 text-sm font-bold text-destructive">
-                  <div className="flex items-center gap-2">
-                    <AlertTriangle className="h-5 w-5 shrink-0" />
-                    <span>
-                      Hazard ({activeHazard.source === 'sensor_hardware' ? 'Hardware ToF' : activeHazard.source === 'sensor_simulator' ? 'Simulator' : 'Vision'}): {activeHazard.description}
-                    </span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveHazard(null)}
-                    className="text-xs underline shrink-0"
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              )}
-
-              {/* Keyboard / Typed Fallback Input */}
-              <div className="pt-1">
-                {!showTextInput ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowTextInput(true)}
-                    className="w-full py-1.5 text-center text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors"
-                  >
-                    Prefer typing? Open text query bar
-                  </button>
-                ) : (
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault();
-                      if (typedQuery.trim()) {
-                        handleUserQuery(typedQuery.trim());
-                        setTypedQuery('');
-                      }
-                    }}
-                    className="flex gap-2"
-                  >
-                    <input
-                      type="text"
-                      value={typedQuery}
-                      onChange={(e) => setTypedQuery(e.target.value)}
-                      placeholder="Ask SENTRA (e.g., 'Describe surroundings' or 'Where are my keys?')..."
-                      className="flex-1 rounded-lg bg-card px-4 py-2.5 text-sm border border-border focus:border-primary focus:outline-none"
-                    />
-                    <button
-                      type="submit"
-                      disabled={isProcessing || !typedQuery.trim()}
-                      className="rounded-lg bg-primary px-4 text-primary-foreground hover:brightness-110 disabled:opacity-50"
-                      aria-label="Send query"
-                    >
-                      <Send className="h-4 w-4" />
-                    </button>
-                  </form>
-                )}
-              </div>
-            </div>
-          )}
-
-          {activeSection === 'vision' && (
-            <LiveVisionView
-              detectedObjects={detectedObjects}
-              sceneDescription={sceneDescription}
-              pathStatus={effectivePathStatus}
-              detectionTimestamp={detectionTimestamp}
-              detectionStale={detectionStale}
-              hazard={activeHazard}
-              onSelectObject={(obj) => {
-                const msg = `${obj.label}, at your ${obj.clockPosition}, ${obj.relativeDistance.replace('_', ' ')}`;
-                speakText(msg, settings.speechRate);
-                setAssistantResponse(msg);
-              }}
-            />
-          )}
-
-          {activeSection === 'finder' && (
-            <ObjectFinderView
-              currentGoal={currentGoal}
-              onStartSearch={(target) => {
-                handleUserQuery(`Find ${target}`);
-              }}
-              onCancelSearch={() => setCurrentGoal(null)}
-              activePerceptionPrompt={activePerceptionPrompt}
-              detectedObjects={detectedObjects}
-              isSearching={isProcessing}
-            />
-          )}
-
-          {activeSection === 'spatial' && (
-            <SpatialWorldView
-              heading={cameraRef.current?.heading ?? activeDevice?.sensors.imu?.heading ?? null}
-              landmarks={landmarks}
-              relationships={relationships}
-              detectedObjects={detectedObjects}
-              currentRoom={currentRoom}
-            />
-          )}
-
-          {activeSection === 'memory' && (
-            <ContextualMemoryView
-              memories={memories}
-              onAddMemory={handleAddMemory}
-              onDeleteMemory={handleDeleteMemory}
-              onClearAll={handleClearMemories}
-              onSpeakMemory={(item) =>
-                speakText(`${item.label}: ${item.note}`, settings.speechRate)
-              }
-              onFindMemoryTarget={(label) => {
-                handleUserQuery(`Find ${label}`);
-                setActiveSection('finder');
-              }}
-            />
-          )}
-
-          {activeSection === 'device' && (
-            <DeviceStatusView
-              devices={devices}
-              activeDevice={activeDevice}
-              selectedDeviceId={settings.selectedWearableDeviceId}
-              onSelectDeviceId={(id) => updateSettings({ ...settings, selectedWearableDeviceId: id })}
-              sseConnected={sseConnected}
-              telemetryError={telemetryError}
-              analytics={analytics}
-              analyticsRange={analyticsRange}
-              onChangeAnalyticsRange={setAnalyticsRange}
-              includeSimulatedAnalytics={includeSimulatedAnalytics}
-              onToggleIncludeSimulated={setIncludeSimulatedAnalytics}
-              onRefreshAnalytics={() => refreshAnalytics(null)}
-              audioOwnership={audioOwnership}
-              onChangeAudioOwnership={handleAudioOwnershipChange}
-            />
-          )}
-
-          {activeSection === 'settings' && (
-            <SettingsDiagnosticsView
-              settings={settings}
-              onUpdateSettings={updateSettings}
-              activeDevice={activeDevice}
-              cameraDiagnostics={cameraRef.current?.getCameraDiagnostics() || null}
-              lastAppError={lastAppError}
-              voiceState={voice.assistantState}
-              voiceError={voice.voiceError}
-              voiceCompatibility={voice.compatibility}
-              micTestActive={voice.micTestActive}
-              micTestTranscript={voice.micTestTranscript}
-              micTestError={voice.micTestError}
-              onStartMicTest={voice.startMicTest}
-              onStopMicTest={voice.stopMicTest}
-              onToggleWakeWord={handleToggleWakeWord}
-              onRestartMicrophone={voice.restartMicrophone}
-              onDeviceRegistered={(deviceId) => {
-                updateSettings({ ...settings, selectedWearableDeviceId: deviceId });
-                refreshAnalytics(null);
-              }}
-            />
-          )}
-        </div>
-      </div>
-
-      {/* Footer Session Counters */}
-      <footer className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono text-muted-foreground border-t border-border pt-3">
-        <div>
-          Queries: {stats.calls} · Avg:{' '}
-          {stats.calls ? Math.round(stats.totalMs / stats.calls) : 0}ms · Alerts: {stats.hazards}
-        </div>
-        <div>SENTRA Phase-2 Prototype · Voice-First Accessibility Assistant</div>
-      </footer>
-
-      {/* Mobile More Drawer (Spatial Awareness, Contextual Memory, Settings & Diagnostics) */}
-      {showMobileMoreMenu && (
-        <div
-          className="md:hidden fixed inset-0 z-40 bg-black/60 flex items-end"
-          onClick={() => setShowMobileMoreMenu(false)}
-        >
-          <div
-            className="w-full rounded-t-2xl bg-card border-t border-border p-4 pb-24 space-y-2 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between pb-1 border-b border-border/60">
-              <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
-                More SENTRA Sections
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowMobileMoreMenu(false)}
-                className="rounded-lg p-1.5 text-muted-foreground hover:text-foreground"
-                aria-label="Close navigation menu"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            {(
-              [
-                { id: 'spatial', label: 'Spatial Awareness (Landmarks & Map)', Icon: Compass, group: 'AI Assistant' },
-                { id: 'memory', label: `Contextual Memory (${memories.length})`, Icon: Bookmark, group: 'AI Assistant' },
-                { id: 'settings', label: 'Settings & Diagnostics', Icon: Sliders, group: 'Wearable & App' },
-              ] as const
-            ).map(({ id, label, Icon, group }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => {
-                  setActiveSection(id);
-                  setShowMobileMoreMenu(false);
+              <SettingsDiagnosticsView
+                settings={settings}
+                onUpdateSettings={updateSettings}
+                activeDevice={activeDevice}
+                cameraDiagnostics={cameraRef.current?.getCameraDiagnostics() || null}
+                lastAppError={lastAppError}
+                voiceState={voice.assistantState}
+                voiceError={voice.voiceError}
+                voiceCompatibility={voice.compatibility}
+                micTestActive={voice.micTestActive}
+                micTestTranscript={voice.micTestTranscript}
+                micTestError={voice.micTestError}
+                onStartMicTest={voice.startMicTest}
+                onStopMicTest={voice.stopMicTest}
+                onToggleWakeWord={handleToggleWakeWord}
+                onRestartMicrophone={voice.restartMicrophone}
+                onDeviceRegistered={(deviceId) => {
+                  updateSettings({ ...settings, selectedWearableDeviceId: deviceId });
+                  refreshAnalytics(null);
                 }}
-                className={`w-full min-h-[48px] flex items-center justify-between rounded-xl px-3.5 py-2.5 text-sm font-bold border ${
-                  activeSection === id
-                    ? 'bg-primary text-primary-foreground border-primary'
-                    : 'bg-secondary text-foreground border-border'
-                }`}
-              >
-                <span className="inline-flex items-center gap-2.5">
-                  <Icon className="h-4 w-4" />
-                  <span>{label}</span>
-                </span>
-                <span className="text-[11px] font-mono opacity-75">{group}</span>
-              </button>
-            ))}
+              />
+
+              <ContextualMemoryView
+                memories={memories}
+                onAddMemory={handleAddMemory}
+                onDeleteMemory={handleDeleteMemory}
+                onClearAll={handleClearMemories}
+                onSpeakMemory={(item) => speakAndDisplay(`${item.label}: ${item.note}`)}
+                onFindMemoryTarget={(label) => {
+                  setActiveView('assistant');
+                  handleUserQuery(`Find my ${label}`);
+                }}
+              />
+            </div>
+          )}
+        </main>
+
+        {/* Quiet Centered Footer */}
+        <footer className="flex flex-col items-center gap-2 pt-2 text-center text-[11px] tracking-[0.12em] text-muted-foreground uppercase">
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <span>SENTRA · VOICE-FIRST ASSISTIVE COMPANION</span>
+            <PWAInstallButton compact />
           </div>
-        </div>
-      )}
-
-      {/* Mobile-First Fixed Bottom Navigation Dock (large 44px+ touch targets) */}
-      <nav
-        aria-label="Mobile Navigation"
-        className="md:hidden fixed bottom-0 left-0 right-0 z-40 safe-bottom-nav bg-card/95 backdrop-blur-md border-t border-border px-2 pt-1.5"
-      >
-        <div className="grid grid-cols-5 gap-1 max-w-lg mx-auto">
-          {(
-            [
-              { id: 'assistant', label: 'Assistant', Icon: Mic },
-              { id: 'vision', label: 'Vision', Icon: Eye },
-              { id: 'finder', label: 'Finder', Icon: Crosshair },
-              { id: 'device', label: 'Wearable', Icon: Cpu },
-            ] as const
-          ).map(({ id, label, Icon }) => {
-            const active = activeSection === id && !showMobileMoreMenu;
-            return (
-              <button
-                key={id}
-                type="button"
-                onClick={() => {
-                  setActiveSection(id);
-                  setShowMobileMoreMenu(false);
-                }}
-                className={`flex min-h-[52px] flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[11px] font-bold transition-colors ${
-                  active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                <Icon className="h-4 w-4" />
-                <span>{label}</span>
-              </button>
-            );
-          })}
-
-          <button
-            type="button"
-            onClick={() => setShowMobileMoreMenu((v) => !v)}
-            className={`flex min-h-[52px] flex-col items-center justify-center gap-0.5 rounded-xl px-1 py-1 text-[11px] font-bold transition-colors ${
-              showMobileMoreMenu ||
-              activeSection === 'spatial' ||
-              activeSection === 'memory' ||
-              activeSection === 'settings'
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Menu className="h-4 w-4" />
-            <span>More</span>
-          </button>
-        </div>
-      </nav>
-    </main>
+        </footer>
+      </div>
+    </div>
   );
 }

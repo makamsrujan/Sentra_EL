@@ -580,19 +580,19 @@ describe('SENTRA Backend Gateway, Auth, Persistence & Safety', () => {
     fs.rmSync(fastTmp, { recursive: true, force: true });
   });
 
-  it('defaults to gemini-3.8-flash, auto-upgrades retired gemini-2.5-flash, normalizes models/ prefix, and rejects stale browser snapshots', async () => {
+  it('defaults to gemini-3.1-flash-lite, auto-upgrades retired gemini-2.5-flash, normalizes models/ prefix, and rejects stale browser snapshots', async () => {
     delete process.env.SENTRA_GEMINI_MODEL;
     delete process.env.GEMINI_API_KEY;
     expect(validateConfiguredModel()).toMatchObject({
       valid: true,
-      configuredModel: 'gemini-3.8-flash',
+      configuredModel: 'gemini-3.1-flash-lite',
     });
 
     process.env.SENTRA_GEMINI_MODEL = 'gemini-2.5-flash';
     expect(validateConfiguredModel()).toMatchObject({
       valid: true,
       rawConfiguredModel: 'gemini-2.5-flash',
-      configuredModel: 'gemini-3.8-flash',
+      configuredModel: 'gemini-3.1-flash-lite',
     });
     process.env.SENTRA_GEMINI_MODEL = 'models/gemini-4-hydrogen';
     expect(validateConfiguredModel()).toMatchObject({
