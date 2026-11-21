@@ -113,7 +113,7 @@ int sentra_telemetry_build_json(const sentra_telemetry_snapshot_t *snap, char *o
         snap->camera_ready ? "true" : "false",
         snap->forward_tof_ready ? "true" : "false",
         snap->imu_ready ? "true" : "false",
-        snap->wm8960_ready ? "true" : "false",
+        (snap->audio_output_ready || snap->wm8960_ready) ? "true" : "false",
         snap->vl53l5cx_ready ? "true" : "false"
     );
 
@@ -130,6 +130,9 @@ int sentra_telemetry_build_json(const sentra_telemetry_snapshot_t *snap, char *o
 #include "mpu6050.h"
 #include "vl53l5cx_optional.h"
 #include "esp_http_client.h"
+#ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+#include "esp_crt_bundle.h"
+#endif
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -142,6 +145,7 @@ static bool s_camera_ready = false;
 static bool s_imu_ready = false;
 static bool s_forward_tof_ready = false;
 static bool s_wm8960_ready = false;
+static bool s_audio_output_ready = false;
 static bool s_vl53l5cx_ready = false;
 static vl53l0x_reading_t s_latest_tof = {0};
 static int64_t s_latest_tof_ms = 0;
@@ -173,6 +177,9 @@ void sentra_telemetry_set_forward_tof_initialized(bool value) {
 }
 void sentra_telemetry_set_wm8960_initialized(bool value) {
     lock_state(); s_wm8960_ready = value; unlock_state();
+}
+void sentra_telemetry_set_audio_output_initialized(bool value) {
+    lock_state(); s_audio_output_ready = value; unlock_state();
 }
 void sentra_telemetry_set_vl53l5cx_initialized(bool value) {
     lock_state(); s_vl53l5cx_ready = value; unlock_state();
@@ -207,6 +214,7 @@ static esp_err_t post_telemetry(void) {
     snap.imu_ready = s_imu_ready;
     snap.forward_tof_ready = s_forward_tof_ready;
     snap.wm8960_ready = s_wm8960_ready;
+    snap.audio_output_ready = s_audio_output_ready;
     snap.vl53l5cx_ready = s_vl53l5cx_ready;
     snap.tof_fresh = s_latest_tof_ms > 0 && ((now_ms - s_latest_tof_ms) <= 5000);
     snap.forward_reading = s_latest_tof;
@@ -233,6 +241,11 @@ static esp_err_t post_telemetry(void) {
         .method = HTTP_METHOD_POST,
         .timeout_ms = 6000,
     };
+#ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
+    if (strncmp(url, "https://", 8) == 0) {
+        http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    }
+#endif
     esp_http_client_handle_t client = esp_http_client_init(&http_cfg);
     if (!client) {
         return ESP_ERR_NO_MEM;

@@ -27,6 +27,8 @@
 #include "mpu6050.h"
 #include "obstacle_awareness.h"
 #include "local_alerts.h"
+#include "board_profile.h"
+#include "i2s_audio.h"
 #include "device_telemetry.h"
 
 /* ========================================================================= */
@@ -330,6 +332,15 @@ static void test_9_optional_audio_disabled(void) {
     assert(local_alerts_is_available() == false);
     assert(local_alerts_play(SENTRA_ALERT_OBSTACLE_CLOSE) == ESP_ERR_NOT_SUPPORTED);
     assert(local_alerts_play(SENTRA_ALERT_DISCONNECTED) == ESP_ERR_NOT_SUPPORTED);
+#ifdef CONFIG_SENTRA_ENABLE_MAX98357A
+    /* Discrete MAX98357A enables speaker output availability without WM8960 */
+    local_alerts_set_audio_ready(true);
+    assert(local_alerts_is_available() == true);
+    local_alerts_set_audio_ready(false);
+#else
+    local_alerts_set_audio_ready(true);
+    assert(local_alerts_is_available() == false);
+#endif
 }
 
 static void test_10_camera_unavailable_telemetry(void) {
@@ -431,6 +442,54 @@ static void test_12_telemetry_serialization_missing_and_valid(int dump_json) {
     }
 }
 
+
+static void test_13_discrete_audio_i2s_and_pin_profile(void) {
+    /* Bench sensor profile constants */
+    assert(BOARD_PIN_I2C_SDA == 4);
+    assert(BOARD_PIN_I2C_SCL == 40);
+    assert(BOARD_PIN_VL53L0X_FWD_XSHUT == -1);
+
+    /* INMP441 24-bit MSB-aligned word -> clamped 16-bit PCM */
+    assert(i2s_audio_convert_inmp441_sample(0) == 0);
+    assert(i2s_audio_convert_inmp441_sample(16384 << 14) == 16384);
+    assert(i2s_audio_convert_inmp441_sample(-(12000 << 14)) == -12000);
+    assert(i2s_audio_convert_inmp441_sample(0x7FFFFFFF) == 32767);
+    assert(i2s_audio_convert_inmp441_sample((int32_t)0x80000000U) == -32768);
+
+    /* 16 kHz mono 16-bit PCM WAV header generation */
+    uint8_t wav_hdr[44] = {0};
+    i2s_audio_write_wav_header(wav_hdr, 32000, 16000, 1, 16);
+    assert(memcmp(&wav_hdr[0], "RIFF", 4) == 0);
+    assert(memcmp(&wav_hdr[8], "WAVE", 4) == 0);
+    assert(memcmp(&wav_hdr[12], "fmt ", 4) == 0);
+    assert(memcmp(&wav_hdr[36], "data", 4) == 0);
+    assert(wav_hdr[22] == 1 && wav_hdr[23] == 0); /* 1 channel (mono) */
+    assert(wav_hdr[34] == 16 && wav_hdr[35] == 0); /* 16 bits/sample */
+
+    /* Telemetry reports audioOutput=true for discrete MAX98357A even when WM8960 is false */
+    char buf[1280];
+    sentra_telemetry_snapshot_t snap = {
+        .device_id = "ESP32-S3-SENTRA-001",
+        .firmware_version = "1.3.0-bench",
+        .sequence = 50,
+        .uptime_ms = 20000,
+        .camera_ready = false,
+        .imu_ready = true,
+        .forward_tof_ready = true,
+        .wm8960_ready = false,
+        .audio_output_ready = true,
+        .vl53l5cx_ready = false,
+        .tof_fresh = true,
+        .forward_reading = { .valid = true, .raw_mm = 700, .distance_cm = 70.0f, .status = VL53L0X_STATUS_OK },
+        .obstacle_level = SENTRA_OBSTACLE_CAUTION,
+        .imu_valid = false,
+        .imu_calibrated = false,
+    };
+    assert(sentra_telemetry_build_json(&snap, buf, sizeof(buf)) > 100);
+    assert(strstr(buf, "\"audioOutput\":true") != NULL);
+    assert(strstr(buf, "\"camera\":false") != NULL);
+}
+
 int main(int argc, char **argv) {
     int dump_json = (argc > 1 && strcmp(argv[1], "--dump-json") == 0);
 
@@ -446,9 +505,10 @@ int main(int argc, char **argv) {
     test_10_camera_unavailable_telemetry();
     test_11_wifi_disconnection();
     test_12_telemetry_serialization_missing_and_valid(dump_json);
+    test_13_discrete_audio_i2s_and_pin_profile();
 
     if (!dump_json) {
-        printf("PASS: all 12 ESP32-S3 firmware pre-hardware unit tests passed.\n");
+        printf("PASS: all 13 ESP32-S3 firmware pre-hardware unit tests passed.\n");
     }
     return 0;
 }

@@ -12,14 +12,25 @@
 #include "wifi_transport.h"
 #include "esp_log.h"
 #include "esp_http_client.h"
+#include "esp_crt_bundle.h"
 #include "cJSON.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 
 static const char *TAG = "AUDIO_HTTP";
+static char s_audio_boot_session[32] = {0};
+
+static const char *get_audio_boot_session(void) {
+    if (s_audio_boot_session[0] == '\0') {
+        snprintf(s_audio_boot_session, sizeof(s_audio_boot_session), "s3-%08lx-%08lx",
+                 (unsigned long)esp_random(), (unsigned long)esp_random());
+    }
+    return s_audio_boot_session;
+}
 
 typedef struct {
     char *buf;
@@ -68,6 +79,7 @@ static esp_err_t post_action_ack(const sentra_runtime_config_t *cfg, const char 
 
     esp_http_client_config_t config = {
         .url = url,
+        .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 5000,
     };
@@ -90,7 +102,7 @@ static esp_err_t post_action_ack(const sentra_runtime_config_t *cfg, const char 
 }
 
 esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len, uint32_t sequence, sentra_http_utterance_result_t *out_result) {
-    if (!local_alerts_is_available() || !i2s_audio_is_ready()) {
+    if (!i2s_audio_mic_is_ready()) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (!wav_buffer || wav_len == 0) return ESP_ERR_INVALID_ARG;
@@ -115,6 +127,7 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
 
     esp_http_client_config_t config = {
         .url = url,
+        .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 15000,
         .buffer_size = 1024,
@@ -132,6 +145,8 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
     esp_http_client_set_header(client, "X-Device-Id", cfg.device_id);
     esp_http_client_set_header(client, "X-Device-Token", cfg.device_token);
     esp_http_client_set_header(client, "X-Sequence", seq_str);
+    esp_http_client_set_header(client, "X-Boot-Session", get_audio_boot_session());
+    esp_http_client_set_header(client, "X-Audio-Trigger", "ptt");
     esp_http_client_set_post_field(client, (const char *)wav_buffer, wav_len);
 
     esp_err_t err = esp_http_client_perform(client);
@@ -166,11 +181,11 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
 }
 
 esp_err_t audio_http_fetch_and_play_reply(const char *reply_id) {
-#ifndef CONFIG_SENTRA_ENABLE_WM8960
+#if !defined(CONFIG_SENTRA_ENABLE_MAX98357A) && !defined(CONFIG_SENTRA_ENABLE_WM8960)
     (void)reply_id;
     return ESP_ERR_NOT_SUPPORTED;
 #else
-    if (!local_alerts_is_available() || !i2s_audio_is_ready()) {
+    if (!i2s_audio_speaker_is_ready()) {
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (!reply_id || reply_id[0] == 0) return ESP_ERR_INVALID_ARG;
@@ -186,6 +201,7 @@ esp_err_t audio_http_fetch_and_play_reply(const char *reply_id) {
 
     esp_http_client_config_t config = {
         .url = url,
+        .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
         .method = HTTP_METHOD_GET,
         .timeout_ms = 12000,
         .buffer_size = 2048,
@@ -276,6 +292,7 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
 
     esp_http_client_config_t config = {
         .url = url,
+        .crt_bundle_attach = (strncmp(url, "https://", 8) == 0) ? esp_crt_bundle_attach : NULL,
         .method = HTTP_METHOD_GET,
         .timeout_ms = 5000,
         .event_handler = http_body_event_handler,
@@ -349,7 +366,7 @@ esp_err_t audio_http_poll_and_execute_actions(void) {
                             }
                         }
 
-                        if (local_alerts_is_available() && cJSON_IsString(replyId) && strlen(replyId->valuestring) > 0) {
+                        if (i2s_audio_speaker_is_ready() && cJSON_IsString(replyId) && strlen(replyId->valuestring) > 0) {
                             (void)audio_http_fetch_and_play_reply(replyId->valuestring);
                         }
 

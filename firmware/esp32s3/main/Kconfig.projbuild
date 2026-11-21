@@ -3,7 +3,7 @@ menu "SENTRA firmware configuration"
 
 config SENTRA_FIRMWARE_VERSION
     string "Firmware version string"
-    default "1.2.0-prehw"
+    default "1.3.0-hw-bringup"
 
 config SENTRA_WIFI_SSID
     string "Wi-Fi SSID"
@@ -14,25 +14,24 @@ config SENTRA_WIFI_PASSWORD
     default ""
 
 config SENTRA_BACKEND_URL
-    string "Backend origin (local HTTP only until TLS CA configured)"
+    string "Backend origin (e.g. http://192.168.x.x:3000 or https://<host>)"
     default ""
 
 config SENTRA_DEVICE_ID
-    string "Registered device ID"
+    string "Registered ESP32-S3 sensor controller device ID"
     default "ESP32-S3-SENTRA-001"
 
 config SENTRA_DEVICE_TOKEN
-    string "Provisioned device token (secret; keep sdkconfig out of git)"
+    string "Provisioned ESP32-S3 device token (secret; keep sdkconfig out of git)"
     default ""
 
-menu "Headband Baseline Sensors & Camera"
+menu "Step 1: S3 Bench Sensors (VL53L0X + GY-521 MPU6050)"
 
 config SENTRA_ENABLE_VL53L0X
-    bool "Enable single forward VL53L0X ToF distance sensor"
+    bool "Enable single forward VL53L0X ToF distance sensor (0x29)"
     default y
     help
-        Finalized baseline hardware has ONE forward VL53L0X mounted on the headband.
-        A second/downward VL53L0X does NOT exist on the baseline unit.
+        Actual hardware has ONE forward VL53L0X. No downward ToF sensor exists.
 
 config SENTRA_VL53L0X_ADDR
     hex "Forward VL53L0X 7-bit I2C address"
@@ -40,88 +39,151 @@ config SENTRA_VL53L0X_ADDR
     range 0x29 0x3F
 
 config SENTRA_ENABLE_MPU6050
-    bool "Enable GY-521 MPU6050 6-axis IMU"
+    bool "Enable GY-521 MPU6050 6-axis IMU (0x68, AD0 low)"
     default y
 
-config SENTRA_ENABLE_CAMERA
-    bool "Enable OV2640 parallel DVP capture (requires verified board wiring)"
+config SENTRA_PIN_I2C_SDA
+    int "Shared I2C SDA GPIO (bench default: 4)"
+    default 4
+
+config SENTRA_PIN_I2C_SCL
+    int "Shared I2C SCL GPIO (bench default: 40)"
+    default 40
+
+config SENTRA_I2C_FREQ_HZ
+    int "Shared I2C bus clock in Hz (100000 conservative for bench/harness)"
+    default 100000
+    range 50000 400000
+
+config SENTRA_PIN_VL53L0X_FWD_XSHUT
+    int "Forward VL53L0X XSHUT GPIO (-1 ONLY if breakout has confirmed onboard pull-up)"
+    default -1
+    help
+        Use -1 only on a single-sensor breakout whose XSHUT pin has a confirmed
+        onboard pull-up resistor. Do not drive an unverified XSHUT pin.
+
+config SENTRA_PIN_ACTION_BUTTON
+    int "User action / PTT GPIO (-1 to disable)"
+    default 5
+
+endmenu
+
+menu "Step 4: Optional Discrete I2S Audio (INMP441 + MAX98357A, Disabled by Default)"
+
+config SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    bool "Enable separate discrete I2S audio profile (INMP441 mic / MAX98357A amp; NO WM8960)"
     default n
     help
-        Enable only after verifying physical ESP32-S3 pinout and keeping the OV2640
-        ribbon/harness short enough for reliable parallel DVP clock integrity.
+        Disabled by default. Phone/browser audio remains the fallback.
+        Leave the speaker physically disconnected until impedance and wattage are confirmed.
+
+config SENTRA_ENABLE_INMP441_MIC
+    bool "Enable INMP441 I2S RX microphone capture (I2S_NUM_0)"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default n
+
+config SENTRA_ENABLE_MAX98357A_AMP
+    bool "Enable MAX98357A I2S TX mono playback (I2S_NUM_1; verify speaker rating first)"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default n
+
+config SENTRA_PIN_INMP441_SCK
+    int "INMP441 SCK / BCLK GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 14
+
+config SENTRA_PIN_INMP441_WS
+    int "INMP441 WS / LRCLK GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 15
+
+config SENTRA_PIN_INMP441_SD
+    int "INMP441 SD / DIN GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 16
+
+config SENTRA_PIN_MAX98357A_BCLK
+    int "MAX98357A BCLK GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 17
+
+config SENTRA_PIN_MAX98357A_LRC
+    int "MAX98357A LRC / WS GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 18
+
+config SENTRA_PIN_MAX98357A_DIN
+    int "MAX98357A DIN (ESP32 DOUT) GPIO"
+    depends on SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+    default 21
+
+config SENTRA_AUDIO_BENCH_TEST_MIC
+    bool "Run one-shot INMP441 mic capture RMS bench check on boot"
+    depends on SENTRA_ENABLE_INMP441_MIC
+    default n
+
+config SENTRA_AUDIO_BENCH_TEST_TONE
+    bool "Run one-shot low-amplitude MAX98357A 440 Hz tone bench check on boot"
+    depends on SENTRA_ENABLE_MAX98357A_AMP
+    default n
+
+endmenu
+
+menu "Legacy / Optional Expansion Modules (Disabled by Default)"
+
+config SENTRA_ENABLE_CAMERA
+    bool "[LEGACY] Enable direct OV2640 parallel DVP on ESP32-S3 (NOT used with separate ESP32-CAM)"
+    default n
 
 config SENTRA_CAM_SHARE_I2C_PORT
-    bool "Share existing I2C port 0 for OV2640 SCCB"
+    bool "[LEGACY] Share existing I2C port 0 for direct OV2640 SCCB"
+    depends on SENTRA_ENABLE_CAMERA
     default y
-    help
-        Prevents esp32-camera from installing a duplicate I2C driver on shared SDA/SCL.
 
 config SENTRA_CAM_XCLK_HZ
-    int "OV2640 XCLK frequency in Hz (10 MHz conservative for wired harness)"
+    int "[LEGACY] Direct OV2640 XCLK frequency in Hz"
+    depends on SENTRA_ENABLE_CAMERA
     default 10000000
     range 5000000 20000000
 
 config SENTRA_CAM_DEFAULT_QUALITY
-    int "OV2640 JPEG quality (4=best, 63=lowest)"
+    int "[LEGACY] Direct OV2640 JPEG quality (4=best, 63=lowest)"
+    depends on SENTRA_ENABLE_CAMERA
     default 12
     range 4 63
 
-endmenu
-
-menu "Optional Expansion Modules (Disabled by Default)"
-
 config SENTRA_ENABLE_WM8960
-    bool "Enable optional Waveshare WM8960 I2S audio codec"
+    bool "[LEGACY] Enable Waveshare WM8960 I2S audio codec (NOT present on actual hardware)"
     default n
-    help
-        Optional expansion only. Keep disabled when running headband
-        OV2640 + VL53L0X + MPU6050 with mobile phone/browser voice audio.
+
+config SENTRA_PIN_I2S_BCLK
+    int "[LEGACY] WM8960 I2S BCLK GPIO"
+    depends on SENTRA_ENABLE_WM8960
+    default 41
+
+config SENTRA_PIN_I2S_WS
+    int "[LEGACY] WM8960 I2S WS GPIO"
+    depends on SENTRA_ENABLE_WM8960
+    default 42
+
+config SENTRA_PIN_I2S_DOUT
+    int "[LEGACY] WM8960 I2S DOUT GPIO"
+    depends on SENTRA_ENABLE_WM8960
+    default 2
+
+config SENTRA_PIN_I2S_DIN
+    int "[LEGACY] WM8960 I2S DIN GPIO"
+    depends on SENTRA_ENABLE_WM8960
+    default 1
+
+config SENTRA_PIN_I2S_MCLK
+    int "[LEGACY] WM8960 I2S MCLK GPIO"
+    depends on SENTRA_ENABLE_WM8960
+    default 38
 
 config SENTRA_ENABLE_VL53L5CX
     bool "Enable optional VL53L5CX multizone depth sensor"
     default n
-    help
-        Optional expansion only; not required for baseline operation.
-
-endmenu
-
-menu "Provisional Pinout (Verify Before Powering Hardware)"
-
-config SENTRA_PIN_I2C_SDA
-    int "Shared I2C SDA GPIO (provisional)"
-    default 47
-
-config SENTRA_PIN_I2C_SCL
-    int "Shared I2C SCL GPIO (provisional)"
-    default 48
-
-config SENTRA_PIN_VL53L0X_FWD_XSHUT
-    int "Forward VL53L0X XSHUT GPIO (-1 if tied high)"
-    default 21
-
-config SENTRA_PIN_ACTION_BUTTON
-    int "User action / PTT GPIO (provisional, -1 to disable)"
-    default 5
-
-config SENTRA_PIN_I2S_BCLK
-    int "Optional WM8960 I2S BCLK GPIO"
-    default 41
-
-config SENTRA_PIN_I2S_WS
-    int "Optional WM8960 I2S WS GPIO"
-    default 42
-
-config SENTRA_PIN_I2S_DOUT
-    int "Optional WM8960 I2S DOUT GPIO"
-    default 2
-
-config SENTRA_PIN_I2S_DIN
-    int "Optional WM8960 I2S DIN GPIO"
-    default 1
-
-config SENTRA_PIN_I2S_MCLK
-    int "Optional WM8960 I2S MCLK GPIO"
-    default 38
 
 endmenu
 
@@ -143,7 +205,7 @@ config SENTRA_TELEMETRY_INTERVAL_MS
     range 500 15000
 
 config SENTRA_FRAME_UPLOAD_INTERVAL_MS
-    int "OV2640 JPEG frame upload interval (ms)"
+    int "[LEGACY] Direct S3 camera upload interval (ms)"
     default 1200
     range 300 30000
 

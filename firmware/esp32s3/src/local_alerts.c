@@ -1,6 +1,6 @@
 /**
  * @file local_alerts.c
- * @brief Optional Acoustic Alert Output Implementation (WM8960-gated).
+ * @brief Local Acoustic Alert Output Implementation (MAX98357A discrete mono amp or legacy WM8960).
  */
 
 #include "local_alerts.h"
@@ -15,11 +15,15 @@
 #include "mock_idf.h"
 #endif
 
+#if defined(CONFIG_SENTRA_ENABLE_MAX98357A) || defined(CONFIG_SENTRA_ENABLE_WM8960)
+#define SENTRA_SPEAKER_OUTPUT_ENABLED 1
+#endif
+
 static const char *TAG = "LOCAL_ALERTS";
 static bool s_audio_ready = false;
 
 void local_alerts_set_audio_ready(bool ready) {
-#ifdef CONFIG_SENTRA_ENABLE_WM8960
+#ifdef SENTRA_SPEAKER_OUTPUT_ENABLED
     s_audio_ready = ready;
 #else
     (void)ready;
@@ -28,14 +32,14 @@ void local_alerts_set_audio_ready(bool ready) {
 }
 
 bool local_alerts_is_available(void) {
-#ifdef CONFIG_SENTRA_ENABLE_WM8960
+#ifdef SENTRA_SPEAKER_OUTPUT_ENABLED
     return s_audio_ready;
 #else
     return false;
 #endif
 }
 
-#ifdef CONFIG_SENTRA_ENABLE_WM8960
+#if defined(SENTRA_SPEAKER_OUTPUT_ENABLED) && defined(ESP_PLATFORM)
 #define TONE_SAMPLE_RATE 24000
 #define PI_F 3.14159265358979323846f
 
@@ -56,22 +60,22 @@ static void generate_sine_pcm(int16_t *buffer, size_t sample_count, float freq_h
 #endif
 
 esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
-#ifndef CONFIG_SENTRA_ENABLE_WM8960
+#if !defined(SENTRA_SPEAKER_OUTPUT_ENABLED) || !defined(ESP_PLATFORM)
     if (alert_type == SENTRA_ALERT_OBSTACLE_CLOSE) {
-        ESP_LOGW(TAG, "LOCAL HAZARD: Forward obstacle threshold reached (WM8960 build-disabled; silent).");
+        ESP_LOGW(TAG, "LOCAL HAZARD: Forward obstacle threshold reached (speaker output disabled/host; silent).");
     } else if (alert_type == SENTRA_ALERT_DISCONNECTED) {
-        ESP_LOGI(TAG, "Network disconnected (WM8960 build-disabled; silent).");
+        ESP_LOGI(TAG, "Network disconnected (speaker output disabled/host; silent).");
     }
     return ESP_ERR_NOT_SUPPORTED;
 #else
     if (!s_audio_ready) {
-        ESP_LOGW(TAG, "Alert %d suppressed: WM8960 audio codec is not initialized.", (int)alert_type);
+        ESP_LOGW(TAG, "Alert %d suppressed: speaker output is not initialized.", (int)alert_type);
         return ESP_ERR_NOT_SUPPORTED;
     }
 
     i2s_audio_abort_playback();
-
-    const float safe_amplitude = 7500.0f;
+    /* Conservative amplitude for small mono speakers driven by MAX98357A */
+    const float safe_amplitude = 3500.0f;
     int16_t tone_buf[1024];
 
     switch (alert_type) {
@@ -93,12 +97,10 @@ esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
             i2s_audio_play((const uint8_t *)tone_buf, count2 * 2, TONE_SAMPLE_RATE);
             break;
         }
-
         case SENTRA_ALERT_CLIFF_DROPOFF: {
             ESP_LOGW(TAG, "Cliff alert invoked without supported downward sensor.");
             return ESP_ERR_NOT_SUPPORTED;
         }
-
         case SENTRA_ALERT_DISCONNECTED: {
             size_t count = (size_t)(0.040f * TONE_SAMPLE_RATE);
             if (count > 1024) count = 1024;
@@ -106,7 +108,6 @@ esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
             i2s_audio_play((const uint8_t *)tone_buf, count * 2, TONE_SAMPLE_RATE);
             break;
         }
-
         case SENTRA_ALERT_MIC_ACTIVATED: {
             size_t count = (size_t)(0.035f * TONE_SAMPLE_RATE);
             if (count > 1024) count = 1024;
@@ -114,7 +115,6 @@ esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
             i2s_audio_play((const uint8_t *)tone_buf, count * 2, TONE_SAMPLE_RATE);
             break;
         }
-
         case SENTRA_ALERT_MIC_STOPPED: {
             size_t count = (size_t)(0.030f * TONE_SAMPLE_RATE);
             if (count > 1024) count = 1024;
@@ -123,7 +123,6 @@ esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
             break;
         }
     }
-
     return ESP_OK;
 #endif
 }

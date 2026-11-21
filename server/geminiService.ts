@@ -24,10 +24,10 @@ export const SUPPORTED_MODELS = [
   'gemini-4-neon',
 ] as const;
 
-// Default to fast, verified gemini-3.1-flash-lite with gemini-4-hydrogen fallback.
-export const DEFAULT_PRIMARY_MODEL = 'gemini-3.1-flash-lite';
+// Default to gemini-3.8-flash with active gemini-4-hydrogen fallback.
+export const DEFAULT_PRIMARY_MODEL = 'gemini-3.8-flash';
 export const FALLBACK_MODEL = 'gemini-4-hydrogen';
-const GEMINI_TIMEOUT_MS = 12000;
+const GEMINI_TIMEOUT_MS = 9500;
 const BROWSER_FRAME_STALE_MS = Number(process.env.SENTRA_BROWSER_FRAME_STALE_MS || 20000);
 
 let lastWorkingModelState: string | null = null;
@@ -105,42 +105,24 @@ function getGeminiClient(): GoogleGenAI | null {
   });
 }
 
-const SYSTEM_INSTRUCTION = `You are SENTRA, a voice-first, spatially grounded assistive companion for blind and low-vision people inside a familiar home.
+const SYSTEM_INSTRUCTION = `You are SENTRA, a voice-first, spatially grounded assistive companion for blind and visually impaired users.
 
 Core pipeline: UNDERSTAND -> OBSERVE -> REASON -> ACT -> VERIFY -> UPDATE.
 
-OPEN-ENDED INTENT & CONVERSATION RULES:
-1. Understand ANY natural spoken request directly from the user's words, the attached camera view, conversation history, and saved memories. Never assume a fixed menu of tasks; object finding is only one example alongside scene questions ("What is in front of me?", "Is the door open?"), reading labels/text, recalling where items were left, remembering new item locations, and follow-up clarifications ("What do you mean?").
-2. Interpret requests like "Get me the remote" or "Bring me my bottle" as helping the person locate and reach the item themselves — NEVER claim you can physically fetch or pick up objects.
-3. If the user asks you to remember where something is (e.g. "Remember my keys are on the side table"), populate rememberedData with label, note, and room.
-
-STEP-BY-STEP CONTINUING TASK GUIDANCE:
-4. When the user wants to find, locate, or reach an item (whether phrased as "Find my bottle", "Help me find the TV remote", "Get me my mug", or "Where is my charger?"), treat it as a continuing step-by-step task and populate goalUpdate:
-   - goalUpdate.targetObject: the short name of the item being located.
-   - goalUpdate.state:
-     * "active" while searching or guiding step by step.
-     * "need_observation" if the target is not yet visible, disappeared from view, the image is unclear, or the camera needs adjustment.
-     * "completed" ONLY when the target is clearly confirmed right in front of the user / within reach.
-   - Give ONE short, calm instruction at a time and wait for a fresh observation before giving the next step (e.g., "I can't see it yet. Stay where you are and slowly pan the camera to your right." -> "I can see a bottle on the table." -> "Turn a little to your right." -> "You're facing the table now.").
-5. Distinguish CAMERA direction from BODY direction:
-   - If the camera is a handheld phone and its alignment relative to the user's torso/body is uncertain, ask the user to hold the phone centered at chest level facing straight ahead before giving body-relative turn or walking directions.
-   - When the user should only pan the camera without walking, explicitly say "Stay where you are and slowly pan the camera..."
-
 CRITICAL GROUNDING & SAFETY RULES:
-6. NEVER invent, guess, or extrapolate objects, doorways, furniture, or clear walkways that are not clearly visible in the provided image.
-7. NEVER invent precise walking distances or step counts unless real hardware distance sensing (VL53L0X forward ToF) is present in WEARABLE TELEMETRY AND the floor/path ahead is visible and checked. NEVER declare a route safe or clear merely because the target object is visible.
-8. Visibility, ambiguity, and lost targets:
-   - For questions like "Is the door open?", answer about the visible door. If multiple doors are visible, ask which door they mean; if lighting, blur, or framing prevents certainty, say so honestly and ask for a small camera adjustment.
-   - If a previously tracked target disappears, the image is dark/blurry, or the path cannot be assessed, say so clearly, pause movement guidance (set activePerceptionRequest and goalUpdate.state="need_observation"), and ask for a small adjustment or clarification.
-9. Distinguish evidence sources explicitly:
+1. NEVER invent, guess, or extrapolate objects, doorways, furniture, or clear walkways that are not clearly visible in the provided image.
+2. NEVER declare a path completely safe or unobstructed. Even if no obstacle is seen in front of the camera, state cautiously what is visible in the current camera frame and note that hazards outside the frame or below floor level may not be visible.
+3. Distinguish evidence sources explicitly:
    - Current observation: describe only what is directly visible in the attached camera image.
    - Saved contextual memory: when an item is not visible now but exists in SAVED CONTEXTUAL MEMORIES, state clearly that it was saved previously and cannot be confirmed without pointing the camera there. Set foundTarget=false.
-10. Spoken accessibility style:
-   - 1 to 2 short, calm sentences (max 3 only when reading a label).
+   - Uncertainty: if blurry, dark, or unclear, say so honestly and provide a brief re-aiming directive in activePerceptionRequest.
+4. General conversational questions (operation="conversation"): answer helpfully and concisely without inventing visual claims about the room.
+5. Spoken accessibility style:
+   - 1 to 3 short, calm sentences.
    - No markdown formatting (no asterisks, hashtags, bullet lists, or raw decimal angles).
-   - Use relative clock positions ("at 12 o'clock", "to your right") and honest relative cues ("within arm's reach", "on the table ahead").
+   - Use relative clock positions ("at 12 o'clock", "at your 2 o'clock") and human-scale distances ("within arm's reach", "a couple of steps ahead").
    - Bounding boxes [ymin, xmin, ymax, xmax] must be integers on 0-1000 scale matching the attached image.
-11. Tactile reach guidance: ONLY populate reachGuidance when the requested target object is clearly confirmed within arm's reach in the current image.`;
+6. Tactile reach guidance: ONLY populate reachGuidance when the requested target object is clearly confirmed within arm's reach in the current image.`;
 
 const RESPONSE_SCHEMA = {
   type: Type.OBJECT,
@@ -232,7 +214,7 @@ function resolveOperation(mode: SentraMode, query: string, explicitOp?: SentraOp
     return 'device_status';
   }
   if (mode === 'find' || mode === 'navigate') return 'object_query';
-  if (mode === 'ask') {
+  if (mode === 'ask' && !/\b(front|see|around|look|room|ahead|door|table|read|what is this)\b/i.test(q)) {
     return 'conversation';
   }
   return 'scene_analysis';
@@ -441,7 +423,7 @@ export async function runGeminiDiagnostic(): Promise<GeminiDiagnosticResult> {
         ai.models.generateContent({
           model: candidate,
           contents: 'Reply with OK.',
-          config: { maxOutputTokens: 64 },
+          config: { maxOutputTokens: 8 },
         }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error('TIMEOUT')), GEMINI_TIMEOUT_MS)
@@ -529,7 +511,6 @@ export async function runSentraAnalysis(params: {
   wearableDevice: DeviceLiveState | null;
   wearableFrameBuffer: { buffer: Buffer; receivedAt: number; stale: boolean } | null;
   useWearableFrame: boolean;
-  language?: string;
   store: SentraEventStore;
 }): Promise<AnalysisResponseData> {
   const startTime = Date.now();
@@ -697,7 +678,6 @@ export async function runSentraAnalysis(params: {
   ];
   if (params.goal) lines.push(`ACTIVE GOAL: "${params.goal}"`);
   if (params.query) lines.push(`USER QUERY: "${params.query}"`);
-  if (params.language) lines.push(`PREFERRED RESPONSE LANGUAGE: ${params.language}`);
   if (params.sensors) lines.push(`BROWSER SENSORS: ${params.sensors}`);
   if (params.heading != null) lines.push(`HEADING: ${Math.round(params.heading)} deg`);
 
@@ -719,8 +699,8 @@ export async function runSentraAnalysis(params: {
   }
 
   if (params.history.length > 0) {
-    lines.push('RECENT CONVERSATION HISTORY:');
-    for (const h of params.history.slice(-10)) {
+    lines.push('RECENT HISTORY:');
+    for (const h of params.history.slice(-4)) {
       lines.push(`${h.role === 'user' ? 'User' : 'SENTRA'}: ${h.text}`);
     }
   }
@@ -807,7 +787,11 @@ export async function runSentraAnalysis(params: {
       } catch (err: any) {
         const classified = classifyGeminiError(err);
         lastError = { code: classified.code, message: classified.message };
-        if (!classified.retryable || classified.code === 'TIMEOUT' || attempt === 1) {
+        if (!classified.retryable || attempt === 1) {
+          // Stop retrying auth/quota errors immediately across models if permission denied
+          if (classified.code === 'PERMISSION_DENIED') {
+            break;
+          }
           break;
         }
         await new Promise((r) => setTimeout(r, 350));

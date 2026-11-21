@@ -1,0 +1,31 @@
+# SENTRA ESP32-S3 Full Wearable Overlay (Sensors + INMP441 Mic + MAX98357A Amp/Speaker)
+#
+# SAFETY WARNING:
+#   DO NOT flash this overlay with the small speaker connected until you have confirmed
+#   the speaker impedance (ohms) and wattage (W) are safe for MAX98357A!
+#   Test Step 1 (sdkconfig.defaults) and INMP441 mic-only (sdkconfig.defaults.audio_bench) first.
+#
+# Usage (from firmware/esp32s3/):
+#   rm -f sdkconfig
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wearable_full" set-target esp32s3
+#   idf.py menuconfig   # Set Wi-Fi SSID/password, backend URL, S3 deviceId, and X-Device-Token
+#   idf.py build flash monitor
+
+CONFIG_SENTRA_ENABLE_CAMERA=n
+CONFIG_SENTRA_ENABLE_WM8960=n
+
+CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=y
+CONFIG_SENTRA_ENABLE_INMP441=y
+CONFIG_SENTRA_ENABLE_MAX98357A=y
+
+# Conflict-free ESP32-S3 N16R8 I2S pins (no overlap with I2C SDA=4/SCL=40, USB, UART0, Flash/PSRAM)
+CONFIG_SENTRA_PIN_INMP441_SCK=14
+CONFIG_SENTRA_PIN_INMP441_WS=15
+CONFIG_SENTRA_PIN_INMP441_SD=16
+
+CONFIG_SENTRA_PIN_MAX98357A_BCLK=17
+CONFIG_SENTRA_PIN_MAX98357A_LRC=18
+CONFIG_SENTRA_PIN_MAX98357A_DIN=21
+
+CONFIG_SENTRA_AUDIO_BENCH_TEST_MIC=n
+CONFIG_SENTRA_AUDIO_BENCH_TEST_TONE=n

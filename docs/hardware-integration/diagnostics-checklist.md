@@ -1,18 +1,19 @@
-# SENTRA Hardware Integration Readiness & Diagnostics Checklist
+# SENTRA Two-Board Hardware Integration Diagnostics Checklist
 
-Use this step-by-step verification procedure when bringing up the physical ESP32-S3 wearable with the SENTRA companion app:
+Use this checklist in order during physical bring-up. Mark items passed only after real bench observation.
 
-| # | Subsystem | Verification Method | Expected Result |
+| # | Step / Subsystem | Verification Method | Expected Result |
 | --- | --- | --- | --- |
-| 1 | Backend & SQLite | Open Settings -> Re-check Health (`GET /api/health`) | HTTP 200, SQLite WAL `databaseAvailable: true`, no crash |
-| 2 | Operator & Device Token | Configure `SENTRA_OPERATOR_TOKEN`, register via Settings or `/api/device/register` | Unique `X-Device-Token` returned; unauthenticated `/telemetry` returns 401 |
-| 3 | Wi-Fi & Telemetry Auth | Boot ESP32-S3 with NVS/menuconfig SSID + token | Serial log shows Wi-Fi IP + HTTP 200 on `/api/device/telemetry` |
-| 4 | Forward VL53L0X | Hold hand at 35 cm and 120 cm in front of headband | Dashboard shows ~35 cm (Critical `< 45 cm`), ~120 cm (Clear); no fake `0 cm` |
-| 5 | GY-521 MPU6050 | Keep headband still at boot or send `RECALIBRATE_IMU` command | `MPU6050` health `valid` & `calibrated`, pitch changes smoothly, heading stays `null` |
-| 6 | Optional Modules | Keep `VL53L5CX` and `WM8960` disabled in Kconfig | Capabilities & health report `unavailable`; boot & loop stay healthy |
-| 7 | OV2640 Camera & PSRAM | Enable camera in Kconfig (`QVGA`/`VGA`); open Wearable Camera | PSRAM detected (`esp_psram_is_initialized()`), JPEG `FF D8` stream `LIVE` `< 5s` age |
-| 8 | Stale & Offline Guards | Unplug headband Wi-Fi power for >6s | Telemetry marks `stale`/`Disconnected`, frames mark `STALE`, no safe-path claim |
-| 9 | Gemini Visual Analysis | Run Verify Gemini API (`POST /api/gemini/diagnostic`) then ask scene query | Uses `gemini-3.8-flash` (or `gemini-4-hydrogen` fallback); rejects stale frames with `NO_FRESH_IMAGE` |
-| 10 | "Hey SENTRA" Voice | Tap Enable Mic -> say "Hey SENTRA, describe ahead" | Spoken answer grounded in fresh OV2640 frame + VL53L0X reading |
-| 11 | Contextual Memory & Goals | Save landmark note & say "Find my keys" | Goals + memories persist across page refresh in SQLite |
-| 12 | Bidirectional Control | Trigger `CAPTURE_FRAME` & config update in Settings | Firmware picks up via `/api/device/poll`, executes, and clears via `/api/device/ack` |
+| 1 | Backend & SQLite | `GET /api/health` | HTTP 200, `databaseAvailable: true`, `cameraPairings` shows `S3=CAM` |
+| 2 | Separate Registration | Register `ESP32-S3-SENTRA-001` and `ESP32-CAM-SENTRA-001` via `POST /api/device/register` | Two distinct `X-Device-Token` values; cross-board token use returns HTTP `401` |
+| 3 | S3 Boot I²C Scan | Flash `firmware/esp32s3` (`sdkconfig.defaults`) and inspect serial | Boot scan ACKs `0x29` (VL53L0X) and `0x68` (MPU6050) on `SDA=4, SCL=40` |
+| 4 | S3 Stationary VL53L0X | Hold flat target at 30 cm, 60 cm, 120 cm; then point at open space / disconnect | Measured cm within bench tolerance; invalid/absent reports `null`/`UNAVAILABLE`, never `0 cm` or clear path |
+| 5 | S3 Stationary MPU6050 | Keep still ~1.5 s at boot, then tilt 30° | `calibrated: true`, smooth pitch change, `heading: null` |
+| 6 | S3 Disabled Modules | Confirm camera, WM8960, downward ToF, discrete audio disabled | `downwardToF: false`, `downwardDistanceMm: null`, clean boot loop |
+| 7 | ESP32-CAM Local JPEG | Flash `firmware/esp32cam` with blank Wi-Fi/token and inspect serial | OV2640 initializes on AI-Thinker candidate profile and logs valid `FF D8 ... FF D9` JPEG sizes |
+| 8 | ESP32-CAM Wi-Fi Upload | Configure own CAM ID + token and reflash | Serial logs `boot_session` + HTTP 200 on `POST /api/device/frame` |
+| 9 | Paired UI & API Check | Open unchanged UI on S3 ID; check `GET /api/device/frame/latest?deviceId=ESP32-S3-SENTRA-001` | UI shows live JPEG + S3 sensors; headers show `X-Device-Id: ESP32-S3-SENTRA-001` and `X-Camera-Device-Id: ESP32-CAM-SENTRA-001` |
+| 10 | Independent Board Health | Query `/api/device/status` separately for S3 ID and CAM ID | Each board reports its own independent connection & health status |
+| 11 | Camera-Only Reboot | Reset ESP32-CAM while S3 stays online | New `X-Boot-Session` advances server sequence monotonically; preview resumes without stalling |
+| 12 | Independent Disconnect | Unplug ESP32-CAM while S3 stays online (and vice versa) | Offline camera yields HTTP `404` / `NO_FRESH_IMAGE` while S3 ToF/IMU stay live; never falls back to another camera or simulator |
+| 13 | Step 4 Audio (Optional) | Test INMP441 RMS alone first; keep speaker disconnected until rating verified | Phone/browser audio stays working fallback; speaker tested only after ohm/watt check |

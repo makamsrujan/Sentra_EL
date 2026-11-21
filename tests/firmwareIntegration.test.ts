@@ -67,7 +67,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('compiles and passes all 12 native C firmware tests under gcc -Wall -Wextra -Werror', () => {
+  it('compiles and passes native C firmware tests (S3 sensors, S3 discrete audio profile, and ESP32-CAM sender) under gcc -Wall -Wextra -Werror', () => {
     const binPath = path.join(tmpDir, 'sentra_fw_test');
     execFileSync(
       'gcc',
@@ -83,6 +83,7 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
         'firmware/esp32s3/src/mpu6050.c',
         'firmware/esp32s3/src/obstacle_awareness.c',
         'firmware/esp32s3/src/local_alerts.c',
+        'firmware/esp32s3/src/i2s_audio.c',
         'firmware/esp32s3/src/device_telemetry.c',
         '-lm',
         '-o',
@@ -92,7 +93,56 @@ describe('ESP32-S3 C Firmware Pre-Hardware Suite & Express Backend Contract', ()
     );
 
     const normalOut = execFileSync(binPath, [], { cwd: rootDir, encoding: 'utf8' });
-    expect(normalOut).toContain('all 12 ESP32-S3 firmware pre-hardware unit tests passed');
+    expect(normalOut).toContain('all 13 ESP32-S3 firmware pre-hardware unit tests passed');
+
+    // Verify separate disabled-by-default discrete audio profile (INMP441 + MAX98357A) passes compile-time pin conflict guards
+    const audioBinPath = path.join(tmpDir, 'sentra_fw_audio_test');
+    execFileSync(
+      'gcc',
+      [
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        '-DSENTRA_FIRMWARE_HOST_TEST',
+        '-DCONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=1',
+        '-DCONFIG_SENTRA_ENABLE_INMP441=1',
+        '-DCONFIG_SENTRA_ENABLE_MAX98357A=1',
+        '-Ifirmware/esp32s3/include',
+        '-Ifirmware/esp32s3/tests',
+        'firmware/esp32s3/tests/test_firmware.c',
+        'firmware/esp32s3/src/vl53l0x.c',
+        'firmware/esp32s3/src/mpu6050.c',
+        'firmware/esp32s3/src/obstacle_awareness.c',
+        'firmware/esp32s3/src/local_alerts.c',
+        'firmware/esp32s3/src/i2s_audio.c',
+        'firmware/esp32s3/src/device_telemetry.c',
+        '-lm',
+        '-o',
+        audioBinPath,
+      ],
+      { cwd: rootDir, stdio: 'pipe' }
+    );
+    const audioOut = execFileSync(audioBinPath, [], { cwd: rootDir, encoding: 'utf8' });
+    expect(audioOut).toContain('all 13 ESP32-S3 firmware pre-hardware unit tests passed');
+
+    // Verify separate ESP32-CAM sender pure-C helper logic
+    const camBinPath = path.join(tmpDir, 'sentra_cam_test');
+    execFileSync(
+      'gcc',
+      [
+        '-Wall',
+        '-Wextra',
+        '-Werror',
+        '-Ifirmware/esp32cam/main',
+        'firmware/esp32cam/tests/test_cam_logic.c',
+        'firmware/esp32cam/main/cam_sender_logic.c',
+        '-o',
+        camBinPath,
+      ],
+      { cwd: rootDir, stdio: 'pipe' }
+    );
+    const camOut = execFileSync(camBinPath, [], { cwd: rootDir, encoding: 'utf8' });
+    expect(camOut).toContain('all 5 ESP32-CAM sender host unit tests passed');
 
     const dumpOut = execFileSync(binPath, ['--dump-json'], { cwd: rootDir, encoding: 'utf8' });
     const validMatch = dumpOut.match(/^JSON_VALID=(.+)$/m);

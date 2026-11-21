@@ -21,6 +21,12 @@ bool sentra_i2c_bus_is_ready(void);
 bool sentra_i2c_bus_lock(uint32_t timeout_ms);
 void sentra_i2c_bus_unlock(void);
 
+/**
+ * @brief Scan 7-bit I2C addresses (0x08..0x77) and log responding devices over serial.
+ * @return Number of ACKed devices, or negative on bus error.
+ */
+int sentra_i2c_bus_scan(i2c_port_t bus);
+
 esp_err_t sentra_i2c_write_reg8(i2c_port_t bus, uint8_t dev_addr, uint8_t reg, uint8_t value);
 esp_err_t sentra_i2c_read_regs(i2c_port_t bus, uint8_t dev_addr, uint8_t reg, uint8_t *out_buf, size_t len);
 esp_err_t sentra_i2c_write_reg16(i2c_port_t bus, uint8_t dev_addr, uint8_t reg, uint16_t value_be);

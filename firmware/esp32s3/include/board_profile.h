@@ -1,24 +1,20 @@
 /**
  * @file board_profile.h
- * @brief SENTRA Hardware Board Profile & Provisional Pinout Specification
+ * @brief SENTRA ESP32-S3 N16R8 Board Profile & Bench Pinout Specification
  *
  * Microcontroller: ESP32-S3 N16R8 (16MB Quad SPI Flash, 8MB Octal PSRAM)
- * Finalized Baseline Headband Hardware (wired harness to bag enclosure):
- *   - 1 x OV2640 Camera Module
- *   - 1 x VL53L0X Forward Time-of-Flight Sensor (default I2C 0x29, optional XSHUT)
- *   - 1 x GY-521 MPU6050 6-DoF IMU (I2C 0x68)
- * Optional Modules (disabled by default; not required for operation):
- *   - Waveshare WM8960 Audio Codec (I2C 0x1A + I2S)
- *   - VL53L5CX Multi-Zone Depth Sensor
+ * Actual Two-Board Hardware:
+ *   - ESP32-S3 Sensors: 1 x forward VL53L0X (I2C 0x29), 1 x GY-521 MPU6050 (I2C 0x68, AD0 low)
+ *   - Separate Camera Board: ESP32-CAM (firmware/esp32cam) over Wi-Fi (no DVP wiring to S3)
+ *   - Optional Discrete Audio Profile (disabled by default, no WM8960):
+ *     INMP441 I2S RX Mic (I2S_NUM_0) + MAX98357A Mono I2S TX Amp (I2S_NUM_1).
+ *   - No downward ToF sensor. No WM8960 codec.
  *
- * CRITICAL HARDWARE WARNINGS:
- * 1. Pin assignments below are PROVISIONAL until exact ESP32-S3 carrier board
- *    and OV2640 breakout pinouts are physically verified with a multimeter.
- * 2. Parallel DVP camera signal integrity (OV2640 8-bit D0..D7 + PCLK/XCLK)
- *    degrades rapidly on ribbon cables longer than ~10-15 cm. If the headband-to-bag
- *    harness exceeds ~15 cm, verify signal integrity or reduce XCLK (e.g. 10 MHz).
- * 3. On some ESP32-S3-DevKitC-1 N16R8 revisions, GPIO 48 (or GPIO 38 on v1.1) drives
- *    the onboard addressable RGB LED. Override SDA/SCL via menuconfig if conflicting.
+ * HARDWARE SAFETY NOTES:
+ * 1. Use XSHUT = -1 ONLY for a single VL53L0X breakout with a confirmed onboard pull-up.
+ *    Do not drive an unverified XSHUT GPIO.
+ * 2. Leave the speaker physically disconnected until its impedance and wattage are confirmed.
+ * 3. Legacy direct OV2640-to-S3 and WM8960 mappings are disabled by default.
  */
 
 #ifndef SENTRA_BOARD_PROFILE_H
@@ -38,30 +34,34 @@ extern "C" {
 #endif
 
 #define SENTRA_BOARD_NAME               "ESP32-S3-N16R8-SENTRA-V1"
-#define SENTRA_BOARD_PINOUT_STATUS      "PROVISIONAL_PENDING_BOARD_PINOUT_VERIFICATION"
+#define SENTRA_BOARD_PINOUT_STATUS      "BENCH_SENSOR_PROFILE_SDA4_SCL40_PENDING_PHYSICAL_TEST"
 
 /* ========================================================================= */
-/* 1. SHARED I2C BUS (400 kHz Fast Mode, single VL53L0X + MPU6050)           */
+/* 1. SHARED I2C BUS (Bench profile: SDA=4, SCL=40, 100 kHz, XSHUT=-1)       */
 /* ========================================================================= */
 #ifdef CONFIG_SENTRA_PIN_I2C_SDA
 #define BOARD_PIN_I2C_SDA               CONFIG_SENTRA_PIN_I2C_SDA
 #else
-#define BOARD_PIN_I2C_SDA               47
+#define BOARD_PIN_I2C_SDA               4
 #endif
 
 #ifdef CONFIG_SENTRA_PIN_I2C_SCL
 #define BOARD_PIN_I2C_SCL               CONFIG_SENTRA_PIN_I2C_SCL
 #else
-#define BOARD_PIN_I2C_SCL               48
+#define BOARD_PIN_I2C_SCL               40
 #endif
 
-#define BOARD_I2C_FREQUENCY_HZ          400000
+#ifdef CONFIG_SENTRA_I2C_FREQ_HZ
+#define BOARD_I2C_FREQUENCY_HZ          CONFIG_SENTRA_I2C_FREQ_HZ
+#else
+#define BOARD_I2C_FREQUENCY_HZ          100000
+#endif
 
-/* Single Forward VL53L0X Reset / XSHUT Pin (-1 if XSHUT pulled high on breakout) */
+/* XSHUT = -1 ONLY when single-sensor VL53L0X breakout has confirmed onboard pull-up */
 #ifdef CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT
 #define BOARD_PIN_VL53L0X_FWD_XSHUT     CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT
 #else
-#define BOARD_PIN_VL53L0X_FWD_XSHUT     21
+#define BOARD_PIN_VL53L0X_FWD_XSHUT     -1
 #endif
 
 #ifdef CONFIG_SENTRA_VL53L0X_ADDR
@@ -71,7 +71,47 @@ extern "C" {
 #endif
 
 /* ========================================================================= */
-/* 2. OPTIONAL WAVESHARE WM8960 AUDIO CODEC (I2S DUPLEX BUS - PROVISIONAL)   */
+/* 2. SEPARATE DISCRETE I2S AUDIO PROFILE (DISABLED BY DEFAULT, NO WM8960)   */
+/*    INMP441 I2S RX Mic (I2S_NUM_0) + MAX98357A Mono I2S TX Amp (I2S_NUM_1) */
+/* ========================================================================= */
+#ifdef CONFIG_SENTRA_PIN_INMP441_SCK
+#define BOARD_PIN_INMP441_SCK           CONFIG_SENTRA_PIN_INMP441_SCK
+#else
+#define BOARD_PIN_INMP441_SCK           14
+#endif
+
+#ifdef CONFIG_SENTRA_PIN_INMP441_WS
+#define BOARD_PIN_INMP441_WS            CONFIG_SENTRA_PIN_INMP441_WS
+#else
+#define BOARD_PIN_INMP441_WS            15
+#endif
+
+#ifdef CONFIG_SENTRA_PIN_INMP441_SD
+#define BOARD_PIN_INMP441_SD            CONFIG_SENTRA_PIN_INMP441_SD
+#else
+#define BOARD_PIN_INMP441_SD            16
+#endif
+
+#ifdef CONFIG_SENTRA_PIN_MAX98357A_BCLK
+#define BOARD_PIN_MAX98357A_BCLK        CONFIG_SENTRA_PIN_MAX98357A_BCLK
+#else
+#define BOARD_PIN_MAX98357A_BCLK        17
+#endif
+
+#ifdef CONFIG_SENTRA_PIN_MAX98357A_LRC
+#define BOARD_PIN_MAX98357A_LRC         CONFIG_SENTRA_PIN_MAX98357A_LRC
+#else
+#define BOARD_PIN_MAX98357A_LRC         18
+#endif
+
+#ifdef CONFIG_SENTRA_PIN_MAX98357A_DIN
+#define BOARD_PIN_MAX98357A_DIN         CONFIG_SENTRA_PIN_MAX98357A_DIN
+#else
+#define BOARD_PIN_MAX98357A_DIN         21
+#endif
+
+/* ========================================================================= */
+/* 3. LEGACY OPTIONAL WAVESHARE WM8960 AUDIO CODEC (DISABLED BY DEFAULT)     */
 /* ========================================================================= */
 #ifdef CONFIG_SENTRA_PIN_I2S_BCLK
 #define BOARD_PIN_I2S_BCLK              CONFIG_SENTRA_PIN_I2S_BCLK
@@ -104,11 +144,8 @@ extern "C" {
 #endif
 
 /* ========================================================================= */
-/* 3. OV2640 PARALLEL DVP CAMERA BUS (PROVISIONAL EXAMPLE MAPPING)           */
+/* 4. LEGACY DIRECT OV2640 PARALLEL DVP BUS (DISABLED; USE firmware/esp32cam)*/
 /* ========================================================================= */
-/* WARNING: Example GPIOs only. Confirm against your physical ESP32-S3 board */
-/* and OV2640 adapter before setting CONFIG_SENTRA_ENABLE_CAMERA=y.          */
-/* Parallel DVP fails over long unshielded cables (>15 cm) at high XCLK.     */
 #ifdef CONFIG_SENTRA_CAM_XCLK_HZ
 #define BOARD_CAM_XCLK_HZ               CONFIG_SENTRA_CAM_XCLK_HZ
 #else
@@ -131,7 +168,7 @@ extern "C" {
 #define BOARD_PIN_CAM_RESET             -1
 
 /* ========================================================================= */
-/* 4. USER CONTROLS & DIAGNOSTIC PINS                                        */
+/* 5. USER CONTROLS & DIAGNOSTIC PINS                                        */
 /* ========================================================================= */
 #ifdef CONFIG_SENTRA_PIN_ACTION_BUTTON
 #define BOARD_PIN_PTT_BUTTON            CONFIG_SENTRA_PIN_ACTION_BUTTON
@@ -141,28 +178,67 @@ extern "C" {
 #define BOARD_PIN_STATUS_LED            -1
 
 /* ========================================================================= */
-/* 5. RESERVED ESP32-S3 N16R8 PINS & COMPILE-TIME GUARD                      */
+/* 6. RESERVED ESP32-S3 N16R8 PINS & COMPILE-TIME CONFLICT GUARDS            */
 /* ========================================================================= */
 /* GPIO 0, 3, 45, 46: Boot / JTAG / VDD_SPI strapping pins                   */
 /* GPIO 19, 20: Native USB OTG D- / D+                                       */
 /* GPIO 26..32: Quad SPI Flash                                               */
 /* GPIO 33..37: Octal SPI PSRAM on ESP32-S3-N16R8 modules                    */
+/* GPIO 43, 44: UART0 TX/RX serial monitor                                   */
 #define SENTRA_PIN_IS_N16R8_RESERVED(p) ( \
+    (p) == 0 || (p) == 3 || \
     (p) == 19 || (p) == 20 || \
     ((p) >= 26 && (p) <= 37) || \
+    (p) == 43 || (p) == 44 || \
     (p) == 45 || (p) == 46 \
 )
 
 #if SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_I2C_SDA) || SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_I2C_SCL)
-#error "I2C SDA/SCL cannot use reserved ESP32-S3 N16R8 Flash/PSRAM/USB/Strapping pins (19,20,26-37,45,46)."
+#error "I2C SDA/SCL cannot use reserved ESP32-S3 N16R8 Flash/PSRAM/USB/UART0/Strapping pins."
+#endif
+
+#if BOARD_PIN_I2C_SDA == BOARD_PIN_I2C_SCL
+#error "I2C SDA and SCL must use distinct GPIOs."
 #endif
 
 #if BOARD_PIN_VL53L0X_FWD_XSHUT >= 0 && SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_VL53L0X_FWD_XSHUT)
-#error "VL53L0X XSHUT cannot use reserved ESP32-S3 N16R8 pins (19,20,26-37,45,46)."
+#error "VL53L0X XSHUT cannot use reserved ESP32-S3 N16R8 pins."
 #endif
 
 #if BOARD_PIN_PTT_BUTTON >= 0 && SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_PTT_BUTTON)
-#error "Action button cannot use reserved ESP32-S3 N16R8 pins (19,20,26-37,45,46)."
+#error "Action button cannot use reserved ESP32-S3 N16R8 pins."
+#endif
+
+#ifdef CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE
+#if defined(CONFIG_SENTRA_ENABLE_WM8960)
+#error "Cannot enable both discrete INMP441/MAX98357A audio and legacy WM8960."
+#endif
+#if defined(CONFIG_SENTRA_ENABLE_CAMERA)
+#error "Discrete INMP441/MAX98357A pins overlap legacy S3 DVP pins; keep CONFIG_SENTRA_ENABLE_CAMERA=n."
+#endif
+#if SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_INMP441_SCK) || \
+    SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_INMP441_WS) || \
+    SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_INMP441_SD) || \
+    SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_MAX98357A_BCLK) || \
+    SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_MAX98357A_LRC) || \
+    SENTRA_PIN_IS_N16R8_RESERVED(BOARD_PIN_MAX98357A_DIN)
+#error "INMP441/MAX98357A GPIOs cannot use reserved ESP32-S3 N16R8 pins."
+#endif
+#if BOARD_PIN_INMP441_SCK == BOARD_PIN_I2C_SDA || BOARD_PIN_INMP441_SCK == BOARD_PIN_I2C_SCL || \
+    BOARD_PIN_INMP441_WS  == BOARD_PIN_I2C_SDA || BOARD_PIN_INMP441_WS  == BOARD_PIN_I2C_SCL || \
+    BOARD_PIN_INMP441_SD  == BOARD_PIN_I2C_SDA || BOARD_PIN_INMP441_SD  == BOARD_PIN_I2C_SCL || \
+    BOARD_PIN_MAX98357A_BCLK == BOARD_PIN_I2C_SDA || BOARD_PIN_MAX98357A_BCLK == BOARD_PIN_I2C_SCL || \
+    BOARD_PIN_MAX98357A_LRC  == BOARD_PIN_I2C_SDA || BOARD_PIN_MAX98357A_LRC  == BOARD_PIN_I2C_SCL || \
+    BOARD_PIN_MAX98357A_DIN  == BOARD_PIN_I2C_SDA || BOARD_PIN_MAX98357A_DIN  == BOARD_PIN_I2C_SCL
+#error "INMP441/MAX98357A GPIOs cannot conflict with the I2C sensor bus (SDA/SCL)."
+#endif
+#if BOARD_PIN_INMP441_SCK == BOARD_PIN_MAX98357A_BCLK || BOARD_PIN_INMP441_SCK == BOARD_PIN_MAX98357A_LRC || \
+    BOARD_PIN_INMP441_SCK == BOARD_PIN_MAX98357A_DIN  || BOARD_PIN_INMP441_WS  == BOARD_PIN_MAX98357A_BCLK || \
+    BOARD_PIN_INMP441_WS  == BOARD_PIN_MAX98357A_LRC  || BOARD_PIN_INMP441_WS  == BOARD_PIN_MAX98357A_DIN || \
+    BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_BCLK || BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_LRC || \
+    BOARD_PIN_INMP441_SD  == BOARD_PIN_MAX98357A_DIN
+#error "INMP441 and MAX98357A GPIOs must be distinct."
+#endif
 #endif
 
 #ifdef __cplusplus

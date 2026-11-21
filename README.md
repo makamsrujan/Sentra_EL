@@ -111,6 +111,7 @@ Edit `.env` before testing Gemini or hardware endpoints. In Google AI Studio, en
 | `SENTRA_DEVICE_TOKEN` | Optional shared device-write token; use a strong, private value |
 | `SENTRA_OPERATOR_TOKEN` | **Important for secured deployments:** protects registration and simulator administration when configured; add to `.env` yourself |
 | `SENTRA_SIMULATOR_ENABLED` | `true` or `false`; permits developer simulator endpoints when enabled |
+| `SENTRA_CAMERA_PAIRINGS` | Optional backend-only two-board camera pairing map (e.g. `ESP32-S3-SENTRA-001=ESP32-CAM-SENTRA-001`); preserves unchanged UI deviceId while routing frames to a separate ESP32-CAM |
 | `SENTRA_HEARTBEAT_TIMEOUT_MS` | Telemetry inactivity timeout; default `15000` milliseconds |
 | `SENTRA_DB_PATH` | SQLite file path; default `./data/sentra.db` |
 | `PORT` | Server port; default `3000` |
@@ -148,11 +149,15 @@ These commands are provided by `package.json`. Their presence does **not** mean 
 
 **Wake-word limitation:** The currently implemented “Hey SENTRA” behavior uses the browser's speech-recognition capabilities in an active foreground session. Browser support varies, especially on iOS. The app offers push-to-talk and typed input as alternatives. A genuine background/screen-off assistant requires a separately designed native or embedded solution.
 
-## ESP32-S3 integration interface
+## Two-board hardware integration (ESP32-S3 + separate ESP32-CAM)
 
-The **ESP32-S3 remains the intended core controller of the wearable**. This repository provides the companion-side communication contract; actual sensor wiring, GPIO configuration, power system, and firmware must be developed and validated separately for the selected boards.
+The actual first hardware integration uses **two separate ESP32 boards** paired strictly in the backend (zero frontend changes):
 
-The proposed wearable arrangement places the camera/sensors on the head-mounted assembly and the controller/power electronics in a connected enclosure. The final pinout and module support depend on the confirmed physical hardware.
+1. **ESP32-S3 N16R8 (`firmware/esp32s3/`):** Main sensor controller with **1 × GY-521 MPU6050** (`0x68`) and **1 × forward VL53L0X** (`0x29`, `XSHUT = -1` only with confirmed onboard pull-up) on `SDA = GPIO4`, `SCL = GPIO40`. No downward ToF sensor. Direct S3 OV2640 (`[LEGACY]`), WM8960 (`[LEGACY]`), and discrete `INMP441`/`MAX98357A` audio are **disabled by default**; phone/browser audio remains the fallback until speaker impedance and wattage are confirmed.
+2. **Separate ESP32-CAM (`firmware/esp32cam/`, ESP-32S module):** Dedicated Wi-Fi JPEG sender using an AI-Thinker-compatible pin profile as a **first candidate** (to be bench-verified). The OV2640 ribbon stays on the ESP32-CAM board — **zero DVP wiring** between the two ESP32 boards. Register it with its **own** device ID and token; `X-Boot-Session` + server-assigned monotonic sequences keep camera-only reboots safe.
+3. **Backend-only pairing (`SENTRA_CAMERA_PAIRINGS`):** Map `<S3_ID>=<CAM_ID>` in `.env` (see `.env.example`). The unchanged UI keeps querying the S3 device ID while the backend resolves frame status, latest JPEG (`X-Device-Id` preserved, `X-Camera-Device-Id` added), visual analysis, and Live Voice from the paired ESP32-CAM. Offline/stale cameras report no live frame and never fall back to another camera or simulator image. Unpaired controllers keep single-device behavior.
+
+See the complete bring-up order and bench procedures in [`docs/hardware-integration/STATUS.md`](docs/hardware-integration/STATUS.md), [`docs/hardware-integration/flashing.md`](docs/hardware-integration/flashing.md), [`docs/hardware-integration/sensor-calibration.md`](docs/hardware-integration/sensor-calibration.md), [`docs/hardware-integration/camera-test.md`](docs/hardware-integration/camera-test.md), and [`docs/hardware-integration/audio-bench-test.md`](docs/hardware-integration/audio-bench-test.md).
 
 ### Versioned telemetry packet
 
@@ -220,10 +225,17 @@ The developer simulator uses separate `/api/device/simulate` and `/api/device/si
 
 ```text
 firmware/
-  esp32s3/                 # ESP-IDF C firmware for ESP32-S3 + Waveshare WM8960
-    include/               # Pinout matrix, codec headers, I2S and alert definitions
-    src/                   # WM8960 I2C driver, I2S audio, local alerts, HTTP client
-    README.md              # Hardware wiring, CTIA headset setup, build and flash guide
+  esp32s3/                 # ESP-IDF v5.3 firmware for ESP32-S3 N16R8 (Step 1 sensors; Step 4 INMP441/MAX98357A disabled by default; legacy S3 cam/WM8960 disabled)
+    sdkconfig.defaults     # Reproducible Step 1 sensor bench profile (SDA=4, SCL=40, XSHUT=-1)
+    sdkconfig.defaults.audio_bench # Optional Step 4 INMP441 bench overlay (MAX98357A still disabled)
+    include/               # Board pin guards, sensor/I2S/telemetry headers
+    src/                   # VL53L0X, MPU6050, I2C scan, discrete I2S audio, telemetry, Wi-Fi/HTTP
+    tests/                 # Native GCC host C unit tests
+    README.md              # Step 1 bring-up & Step 4 discrete audio instructions
+  esp32cam/                # Separate ESP-IDF v5.3 firmware for ESP32-CAM (target: esp32, AI-Thinker first-candidate profile)
+    main/                  # OV2640 JPEG capture, Wi-Fi reconnect, bounded retries, X-Boot-Session upload
+    tests/                 # Native GCC host C unit tests for ESP32-CAM sender logic
+    README.md              # Serial flashing & first local JPEG bench test guide
 src/
   App.tsx                  # Main SENTRA web experience (with audio ownership coordination)
   components/              # Assistant, camera, memory, analytics, diagnostics UI

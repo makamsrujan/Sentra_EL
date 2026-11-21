@@ -1,21 +1,21 @@
-# SENTRA acceptance gates
+# SENTRA First Hardware Integration Acceptance Gates
 
-Mark a checkbox only after a real recorded test — never solely from generated code or simulator runs.
+Check boxes **only** after real recorded verification — never from code generation or simulator runs alone.
 
-## Software, Protocol & Host Tests
-- [ ] GitHub application CI (`lint`, `vitest`, Vite build, `esp32_sim.mjs`) green on merge commit.
-- [ ] GitHub ESP32 firmware CI (`espressif/esp-idf-ci-action` release-v5.3 `esp32s3`) green on merge commit.
-- [ ] Operator registration and one-time `X-Device-Token` provisioning tested end-to-end.
-- [ ] Live Gemini API verified via `POST /api/gemini/diagnostic` (`gemini-3.8-flash` / fallback).
+## Software, Backend Pairing & Host C Verification (Automated)
+- [ ] `npm run lint` (`tsc --noEmit`) passes.
+- [ ] `npm test` (including `tests/hardwarePairing.test.ts` and `tests/firmwareIntegration.test.ts`) passes.
+- [ ] `npm run build` (Vite production build) passes.
+- [ ] Native GCC `-Wall -Wextra -Werror` suites pass for S3 sensor profile, S3 discrete audio profile, and ESP32-CAM sender logic.
+- [ ] Simulator HTTP smoke test (`node simulator/esp32_sim.mjs`) passes (simulated data only).
+- [ ] Git diff confirms **zero frontend changes**.
+- [ ] Both ESP-IDF v5.3 firmware targets (`firmware/esp32s3` as `esp32s3` and `firmware/esp32cam` as `esp32`) compile cleanly with ESP-IDF v5.3 (locally or in GitHub Actions).
 
-## Physical Hardware Verification (Upon Assembly)
-- [ ] Exact ESP32-S3 N16R8 board, OV2640 breakout, VL53L0X, and GY-521 wiring schematics matched to `Kconfig.projbuild` GPIO pins.
-- [ ] ESP32-S3 PSRAM (`esp_psram_is_initialized()`) detected and Wi-Fi maintains fresh telemetry without watchdog resets.
-- [ ] Single forward VL53L0X produces validated cm distances matching calibrated targets; sensor faults report `invalid`/`unavailable`.
-- [ ] GY-521 MPU6050 stationary calibration completes cleanly and pitch reflects real head tilt (no fabricated compass heading).
-- [ ] OV2640 captures valid JPEG frames at headband cable length and delivers them under fresh age thresholds.
-- [ ] Bidirectional runtime config (`POST /api/device/config`) and remote commands (`CAPTURE_FRAME`, `RECALIBRATE_IMU`) execute and acknowledge (`POST /api/device/ack`).
-- [ ] Disconnected sensors and stale camera frames (`> frameStaleMs`) never display as live observations or imply safe paths.
-- [ ] Optional modules (`VL53L5CX`, `WM8960`) remain cleanly disabled/unavailable unless physically attached and enabled via Kconfig.
-- [ ] Power stability and thermal behavior verified on the 5000 mAh bag-mounted USB power bank.
-- [ ] Supervised indoor demonstration completed with explicit baseline forward-only sensing notice.
+## Physical Bench Verification (Pending Real Hardware)
+- [ ] **Step 1 (S3):** Boot I²C scan detects `0x29` (VL53L0X) and `0x68` (MPU6050) on `SDA=GPIO4, SCL=GPIO40` with confirmed onboard XSHUT pull-up.
+- [ ] **Step 1 (S3):** Stationary VL53L0X readings match measured distances (30 / 60 / 120 cm); invalid/absent readings report `null`/`unavailable`.
+- [ ] **Step 1 (S3):** GY-521 calibrates at rest, responds to tilt, and keeps `heading: null`.
+- [ ] **Step 2 (ESP32-CAM):** Local serial JPEG test produces valid `FF D8 ... FF D9` frames on the physical ESP-32S board.
+- [ ] **Step 2 (ESP32-CAM):** Authenticated Wi-Fi JPEG uploads succeed using its own `deviceId` and `X-Device-Token`.
+- [ ] **Step 3 (Pairing):** `SENTRA_CAMERA_PAIRINGS` pairs S3 + CAM across preview, visual analysis, and Live Voice; camera-only reboot resumes cleanly; offline/stale camera reports no live frame without fallback.
+- [ ] **Step 4 (Audio — Optional):** INMP441 mic bench test verified first; speaker impedance and wattage confirmed **before** connecting speaker and testing MAX98357A tone playback.

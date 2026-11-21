@@ -1,12 +1,12 @@
-# Known limitations, as verified from this source tree
+# Known Limitations (Actual Two-Board Hardware Baseline)
 
-- **Physical hardware unverified:** Firmware (`vl53l0x.c`, `mpu6050.c`, `camera_driver.c`, `i2c_bus.c`, `sentra_nvs_config.c`) has been reviewed and host-unit tested on pure-C math/validation functions, but has not yet been compiled by ESP-IDF or flashed onto physical ESP32-S3 silicon locally.
-- **Single forward ToF only on baseline hardware:** Only ONE forward-facing VL53L0X is present on the headband. There is NO downward drop-off ToF sensor and NO multizone VL53L5CX unless optionally installed and enabled (`CONFIG_SENTRA_ENABLE_VL53L5CX=y`). Accordingly, `downwardDropOffCapable` is `false` and SENTRA never claims step/cliff safety or obstacle-free walking paths.
-- **6-axis IMU only (no magnetometer):** GY-521 (MPU6050) supplies accelerometer and gyroscope readings for head pitch and motion estimation, but has no magnetometer. Absolute compass heading (`imu.heading`) from the wearable stays `null` (browser compass is used only if phone orientation events are available).
-- **Optional WM8960 audio:** Disabled by default (`CONFIG_SENTRA_ENABLE_WM8960=n`). When disabled, voice input/output runs primarily through the phone/browser companion (`Web Speech API` + `speechSynthesis`), while backend STT/TTS endpoints (`gemini-3.5-transcribe` / `gemini-3.8-flash-lite-tts`) remain ready for optional audio boards.
-- **Foreground voice wake limitation:** "Hey SENTRA" continuous wake listening depends on an active foreground browser session (`SpeechRecognition`) and is not implemented offline on the ESP32-S3.
-- **No battery fuel gauge on baseline bag enclosure:** The 5000 mAh USB power bank supplies 5 V USB power without I²C telemetry, so `batteryPercent` reports `null` unless optional power telemetry is added.
-- **OV2640 ribbon & wiring integrity:** Headband-to-bag camera wiring length can introduce clock/signal attenuation; resolution/quality tuning (`QVGA`/`VGA`) is exposed in runtime config in case lower pixel clocks are required.
-- **Visual-Inertial SLAM not implemented:** `SlamPoseContractPlaceholder` is exposed solely as a planned interface (`status: 'planned'`).
-- **Gemini availability & latency:** Visual scene grounding depends on `GEMINI_API_KEY` and upstream model availability (`gemini-3.8-flash` / fallback `gemini-4-hydrogen`).
-- **Not a medical or certified mobility device.**
+- **Not physically flashed or bench-tested in CI/sandbox:** All firmware builds here are validated via native GCC host C tests (and GitHub Actions ESP-IDF v5.3 CI jobs when run on GitHub). Local ESP-IDF cross-compilation and real silicon bench testing are still required on your bench.
+- **AI-Thinker ESP32-CAM pinout is a first candidate:** Many ESP-32S camera clones match AI-Thinker pins, but exact pin compatibility must be verified with the local serial JPEG test before relying on the board.
+- **Single forward VL53L0X only (no downward ToF):** `downwardDropOffCapable` is `false` and `downwardDistanceMm` is `null`. SENTRA cannot detect stairs, curbs, holes, or drop-offs and **never** claims a path is safe to walk.
+- **6-axis IMU only (no magnetometer):** GY-521 (MPU6050) has no magnetometer; wearable `imu.heading` remains `null`.
+- **Separate board health UI limitation (hard zero-frontend-change constraint):** Because the React frontend is intentionally unchanged, the UI does not show a separate ESP32-CAM settings field or dual-board health card. Configure pairings via `SENTRA_CAMERA_PAIRINGS` in `.env` and inspect each board independently via `GET /api/health`, `GET /api/device/status?deviceId=<id>`, and `X-Camera-Device-Id` headers (see `architecture.md`).
+- **Unverified speaker & disabled discrete audio:** `INMP441` and `MAX98357A` support is compiled/guarded in a separate disabled-by-default profile and has **not** been bench-tested. Keep the speaker disconnected until impedance and wattage are confirmed; use phone/browser audio as the fallback.
+- **Legacy S3 camera & WM8960:** Retained strictly disabled by default (`CONFIG_SENTRA_ENABLE_CAMERA=n`, `CONFIG_SENTRA_ENABLE_WM8960=n`).
+- **No battery fuel gauge:** Sealed USB power banks do not expose I²C battery telemetry; `batteryPercent` stays `null`.
+- **Foreground browser wake-word limitation:** "Hey SENTRA" requires an active foreground browser session.
+- **Not a medical or certified mobility/navigation device.**

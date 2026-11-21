@@ -346,7 +346,6 @@ export const AnalyzeRequestSchema = z.object({
   heading: z.number().finite().nullable().optional(),
   useWearableFrame: z.boolean().default(false),
   wearableDeviceId: z.string().max(64).optional(),
-  language: z.string().max(32).optional(),
 });
 
 /**
@@ -794,4 +793,3 @@ export function createPcmWav(
   const header = createWavHeader(pcmBuffer.length, sampleRate, channels, bitsPerSample);
   return Buffer.concat([header, pcmBuffer]);
 }
-

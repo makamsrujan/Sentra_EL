@@ -1,0 +1,30 @@
+# Reproducible ESP-IDF v5.3 bench profile for SENTRA ESP32-S3 N16R8 sensor bring-up.
+# Hardware: ESP32-S3 N16R8 (16 MB Flash, 8 MB Octal PSRAM), GY-521 MPU6050 (0x68, AD0 low),
+# and ONE forward VL53L0X (0x29). No S3 camera DVP wiring, no WM8960, no downward ToF.
+# Keep Wi-Fi credentials, tokens, and local build overrides out of Git.
+
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+
+# Step 1 Sensor Bench Profile (SDA=GPIO4, SCL=GPIO40, XSHUT=-1 ONLY for onboard pull-up breakout)
+CONFIG_SENTRA_ENABLE_VL53L0X=y
+CONFIG_SENTRA_VL53L0X_ADDR=0x29
+CONFIG_SENTRA_ENABLE_MPU6050=y
+CONFIG_SENTRA_PIN_I2C_SDA=4
+CONFIG_SENTRA_PIN_I2C_SCL=40
+CONFIG_SENTRA_I2C_FREQ_HZ=100000
+CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT=-1
+
+# Separate ESP32-CAM handles video (firmware/esp32cam); keep S3 camera disabled
+CONFIG_SENTRA_ENABLE_CAMERA=n
+
+# Audio disabled by default (phone/browser audio fallback; no WM8960 on actual hardware)
+CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=n
+CONFIG_SENTRA_ENABLE_WM8960=n
+CONFIG_SENTRA_ENABLE_VL53L5CX=n
+
+# TLS root CA bundle for optional HTTPS backend URLs alongside local HTTP
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y

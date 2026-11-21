@@ -89,11 +89,15 @@ function isSimulatorAllowed(
   return { allowed: true };
 }
 
-export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?: number }) {
+export function createSentraApp(options?: {
+  dbPath?: string;
+  heartbeatTimeoutMs?: number;
+  cameraPairings?: Record<string, string> | string;
+}) {
   const app = express();
   app.set('trust proxy', 1);
   const store = new SentraEventStore(options?.dbPath);
-  const gateway = new DeviceGateway(store, options?.heartbeatTimeoutMs);
+  const gateway = new DeviceGateway(store, options?.heartbeatTimeoutMs, options?.cameraPairings);
 
   // Raw binary JPEG parser specifically for ESP32-S3 binary uploads
   app.use(
@@ -115,6 +119,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
 
   const audioReplyStore = new AudioReplyStore();
   const lastProcessedAudioSequence = new Map<string, number>();
+  const lastProcessedAudioBootSession = new Map<string, string>();
   const activeVoiceTurns = new Set<string>();
   let audioOwnershipMode: 'browser' | 'wearable' | 'test' = 'wearable';
 
@@ -151,6 +156,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       lastTelemetryAgeMs:
         primary?.lastTelemetryAt != null ? Math.max(0, now - primary.lastTelemetryAt) : null,
       lastFrameAgeMs: primary?.frameAgeMs ?? null,
+      cameraPairings: gateway.getCameraPairings(),
     });
   });
 
@@ -381,10 +387,19 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       });
     }
 
+    const rawBootSession =
+      req.header('x-boot-session') ||
+      (typeof req.query.bootSession === 'string' ? req.query.bootSession : undefined) ||
+      (!Buffer.isBuffer(req.body) && req.body && typeof req.body.bootSession === 'string'
+        ? req.body.bootSession
+        : undefined);
+    const bootSession = rawBootSession ? rawBootSession.trim().slice(0, 64) || undefined : undefined;
+
     const result = gateway.ingestFrame({
       deviceId,
       buffer: jpegBuffer,
       sequence,
+      bootSessionId: bootSession,
       sourceMode: 'hardware',
     });
 
@@ -412,8 +427,13 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     const latest = gateway.getLatestFrame(deviceId);
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
 
-    if (!latest.available || !latest.frame) {
-      return res.status(404).json({ ok: false, error: 'No frame available for device.', deviceId });
+    if (!latest.available || !latest.cameraConnected || !latest.frame) {
+      return res.status(404).json({
+        ok: false,
+        error: 'No live frame available for device.',
+        deviceId,
+        cameraDeviceId: latest.sourceDeviceId,
+      });
     }
 
     if (latest.stale && req.query.rejectStale === 'true') {
@@ -421,12 +441,14 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
         ok: false,
         error: 'Latest frame is stale.',
         deviceId,
+        cameraDeviceId: latest.sourceDeviceId,
         frameAgeMs: latest.ageMs,
       });
     }
 
     res.setHeader('Content-Type', latest.frame.mimeType);
     res.setHeader('X-Device-Id', deviceId);
+    res.setHeader('X-Camera-Device-Id', latest.sourceDeviceId);
     res.setHeader('X-Frame-Sequence', String(latest.frame.sequence));
     res.setHeader('X-Frame-Timestamp', String(latest.frame.receivedAt));
     res.setHeader('X-Frame-Age-Ms', String(latest.ageMs ?? 0));
@@ -486,8 +508,16 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       });
     }
 
-    // Prevent duplicate or out-of-order processing of recording sequences
-    const lastSeq = lastProcessedAudioSequence.get(deviceId) ?? 0;
+    // Support per-boot session IDs so ESP32-S3 reboots resetting sequence to 1 never trigger 409
+    const rawAudioBootSession =
+      req.header('x-boot-session') ||
+      (typeof req.query.bootSession === 'string' ? req.query.bootSession : undefined);
+    const audioBootSession = rawAudioBootSession ? rawAudioBootSession.trim().slice(0, 64) || undefined : undefined;
+    const prevAudioBootSession = lastProcessedAudioBootSession.get(deviceId);
+    const isNewAudioBootSession = Boolean(audioBootSession && audioBootSession !== prevAudioBootSession);
+
+    // Prevent duplicate or out-of-order processing of recording sequences within the same boot session
+    const lastSeq = isNewAudioBootSession ? 0 : (lastProcessedAudioSequence.get(deviceId) ?? 0);
     if (sequence > 0 && sequence <= lastSeq) {
       return res.status(409).json({
         ok: false,
@@ -556,6 +586,12 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
 
     activeVoiceTurns.add(deviceId);
     lastProcessedAudioSequence.set(deviceId, sequence);
+    if (audioBootSession) {
+      lastProcessedAudioBootSession.set(deviceId, audioBootSession);
+    }
+
+    const triggerHeader = (req.header('x-audio-trigger') || '').toLowerCase().trim();
+    const triggerSource = triggerHeader === 'ptt' ? 'ptt' : 'wake';
 
     try {
       const turnResult = await processWearableVoiceTurn({
@@ -563,6 +599,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
         sequence,
         wavBuffer,
         rawTranscript,
+        triggerSource,
         gateway,
         store,
         audioReplyStore,
@@ -850,8 +887,17 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     }
 
     const d = parsed.data;
-    const wearableDevice = gateway.getLiveState(d.wearableDeviceId);
-    const frameEntry = wearableDevice ? gateway.getLatestFrame(wearableDevice.deviceId) : null;
+    const rawWearableDevice = gateway.getLiveState(d.wearableDeviceId);
+    const explicitSimulatorSelected = Boolean(d.wearableDeviceId && d.wearableDeviceId.startsWith('SIM-'));
+    const wearableDevice =
+      rawWearableDevice && (rawWearableDevice.sourceMode !== 'simulator' || explicitSimulatorSelected)
+        ? rawWearableDevice
+        : null;
+    // Never substitute simulator frames into live wearable visual analysis
+    const frameEntry =
+      wearableDevice && wearableDevice.sourceMode !== 'simulator'
+        ? gateway.getLatestFrame(wearableDevice.deviceId, { excludeSimulator: true })
+        : null;
 
     const result = await runSentraAnalysis({
       mode: d.mode,
@@ -867,7 +913,7 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
       heading: d.heading ?? null,
       wearableDevice,
       wearableFrameBuffer:
-        frameEntry && frameEntry.available && frameEntry.frame
+        frameEntry && frameEntry.available && frameEntry.cameraConnected && frameEntry.frame
           ? {
               buffer: frameEntry.frame.buffer,
               receivedAt: frameEntry.frame.receivedAt,
@@ -875,7 +921,6 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
             }
           : null,
       useWearableFrame: d.useWearableFrame,
-      language: d.language,
       store,
     });
 
@@ -888,31 +933,6 @@ export function createSentraApp(options?: { dbPath?: string; heartbeatTimeoutMs?
     }
 
     return res.json(result);
-  });
-
-  // Ensure unknown /api/* routes always return JSON instead of falling through to SPA HTML
-  app.use('/api', (_req, res) => {
-    res.status(404).json({
-      ok: false,
-      status: 'error',
-      error: 'API endpoint not found.',
-    });
-  });
-
-  // Ensure Express body-parser / runtime errors on /api/* always return JSON instead of HTML
-  app.use('/api', (err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    const status = typeof err?.status === 'number' && err.status >= 400 ? err.status : 500;
-    const message =
-      err?.type === 'entity.too.large'
-        ? 'Camera image payload was too large. Retrying with a smaller frame.'
-        : err?.message || 'Unexpected server error.';
-    res.status(status).json({
-      ok: false,
-      status: 'error',
-      errorCode: 'UPSTREAM_ERROR',
-      errorMessage: message,
-      spokenResponse: 'I had trouble processing that request on the server. Please try again.',
-    });
   });
 
   return { app, store, gateway, audioReplyStore };

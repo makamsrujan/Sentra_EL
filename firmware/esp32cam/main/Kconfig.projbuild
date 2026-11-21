@@ -1,0 +1,60 @@
+# SENTRA ESP32-CAM configuration. Never commit sdkconfig containing Wi-Fi passwords or tokens.
+menu "SENTRA ESP32-CAM Sender Configuration"
+
+config SENTRA_CAM_WIFI_SSID
+    string "Wi-Fi SSID"
+    default ""
+
+config SENTRA_CAM_WIFI_PASSWORD
+    string "Wi-Fi password"
+    default ""
+
+config SENTRA_CAM_BACKEND_URL
+    string "Backend origin (e.g. http://192.168.x.x:3000 or https://<host>)"
+    default ""
+
+config SENTRA_CAM_DEVICE_ID
+    string "Registered ESP32-CAM device ID (must be distinct from ESP32-S3 ID)"
+    default "ESP32-CAM-SENTRA-001"
+
+config SENTRA_CAM_DEVICE_TOKEN
+    string "Provisioned ESP32-CAM device token (secret; keep sdkconfig out of git)"
+    default ""
+
+config SENTRA_CAM_FRAME_INTERVAL_MS
+    int "JPEG capture & upload interval (ms)"
+    default 1200
+    range 300 15000
+
+config SENTRA_CAM_JPEG_QUALITY
+    int "OV2640 JPEG quality (10=high quality, 63=lowest)"
+    default 14
+    range 8 63
+
+choice SENTRA_CAM_FRAMESIZE
+    prompt "OV2640 JPEG frame resolution"
+    default SENTRA_CAM_FRAMESIZE_QVGA
+
+config SENTRA_CAM_FRAMESIZE_QVGA
+    bool "QVGA (320x240) - recommended for first bench bring-up"
+
+config SENTRA_CAM_FRAMESIZE_VGA
+    bool "VGA (640x480) - higher detail (requires stable Wi-Fi & PSRAM)"
+
+endchoice
+
+config SENTRA_CAM_XCLK_HZ
+    int "OV2640 XCLK frequency in Hz (20 MHz default for onboard AI-Thinker ribbon)"
+    default 20000000
+    range 10000000 20000000
+
+config SENTRA_CAM_MAX_UPLOAD_RETRIES
+    int "Maximum bounded retries per JPEG upload failure"
+    default 3
+    range 1 5
+
+config SENTRA_CAM_ENABLE_FLASH_LED
+    bool "Allow AI-Thinker GPIO 4 flash LED (keep disabled to avoid glare/power spikes)"
+    default n
+
+endmenu

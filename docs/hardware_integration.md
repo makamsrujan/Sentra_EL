@@ -383,23 +383,73 @@ All component headers have male pins, so using **Female-to-Male (F-to-M) ribbon 
 
 ---
 
-## 5. ESP32-S3 N16R8 Complete GPIO Allocation & Reserved Pins
+## 5. Master GPIO-to-Pin Mapping Table & S3 I²C Firmware Settings
 
-### Used GPIOs (Verified Conflict-Free by Compile-Time `#error` Guards)
+### 5.1 Complete GPIO-to-Pin Mapping (All Hardware Components)
 
-| ESP32-S3 GPIO | Peripheral | Signal | Notes |
+All ESP32-S3 GPIO assignments below are validated against reserved N16R8 pins and bus collisions at compile time in `firmware/esp32s3/include/board_profile.h`.
+
+| Hardware Component | Component Pin | Controller Pin / Rail | Bus / Interface | Firmware Kconfig / Macro | Wiring Style | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| **GY-521 (MPU6050)** | `VCC` | S3 `3V3` rail | Power (`3.3V`) | `CONFIG_SENTRA_ENABLE_MPU6050=y` | F-to-M (mobile) | 3.3V logic safe |
+| **GY-521 (MPU6050)** | `GND` | S3 `GND` rail | Ground | — | F-to-M (mobile) | Common ground |
+| **GY-521 (MPU6050)** | `SDA` | **ESP32-S3 `GPIO4`** | Shared I²C (`0x68`) | `CONFIG_SENTRA_PIN_I2C_SDA=4` | F-to-M → SDA Hub | 100 kHz bus |
+| **GY-521 (MPU6050)** | `SCL` | **ESP32-S3 `GPIO40`** | Shared I²C (`0x68`) | `CONFIG_SENTRA_PIN_I2C_SCL=40` | F-to-M → SCL Hub | 100 kHz bus |
+| **GY-521 (MPU6050)** | `AD0` | S3 `GND` rail | Address strap | `0x68` (AD0 low) | F-to-M (mobile) | Locks address to `0x68` |
+| **VL53L0X (Forward ToF)** | `VIN` / `VCC` | S3 `3V3` rail | Power (`3.3V`) | `CONFIG_SENTRA_ENABLE_VL53L0X=y` | F-to-M (mobile) | Single forward sensor only |
+| **VL53L0X (Forward ToF)** | `GND` | S3 `GND` rail | Ground | — | F-to-M (mobile) | Common ground |
+| **VL53L0X (Forward ToF)** | `SDA` | **ESP32-S3 `GPIO4`** | Shared I²C (`0x29`) | `CONFIG_SENTRA_PIN_I2C_SDA=4` | F-to-M → SDA Hub | Shared with MPU6050 |
+| **VL53L0X (Forward ToF)** | `SCL` | **ESP32-S3 `GPIO40`** | Shared I²C (`0x29`) | `CONFIG_SENTRA_PIN_I2C_SCL=40` | F-to-M → SCL Hub | Shared with MPU6050 |
+| **VL53L0X (Forward ToF)** | `XSHUT` | *Not connected* | Shutdown | `CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT=-1` | None | Only if breakout has onboard pull-up |
+| **INMP441 Mic** | `VDD` | S3 `3V3` rail | Power (`3.3V` only) | `CONFIG_SENTRA_ENABLE_INMP441=y` | M-to-M (breadboard) | Never apply `5V` |
+| **INMP441 Mic** | `GND` | S3 `GND` rail | Ground | — | M-to-M (breadboard) | Common ground |
+| **INMP441 Mic** | `L/R` | S3 `GND` rail | Channel select | `I2S_STD_SLOT_LEFT` | M-to-M (breadboard) | Selects Left mono slot |
+| **INMP441 Mic** | `SCK` | **ESP32-S3 `GPIO14`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_SCK=14` | M-to-M (breadboard) | Bit clock (`BCLK`) |
+| **INMP441 Mic** | `WS` | **ESP32-S3 `GPIO15`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_WS=15` | M-to-M (breadboard) | Word select (`LRCLK`) |
+| **INMP441 Mic** | `SD` | **ESP32-S3 `GPIO16`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_SD=16` | M-to-M (breadboard) | Serial mic data in |
+| **MAX98357A Amp** | `VIN` | S3 `3V3` rail (initial) | Power (`3.3V` start) | `CONFIG_SENTRA_ENABLE_MAX98357A=y` | M-to-M (breadboard) | Lower initial bench power |
+| **MAX98357A Amp** | `GND` | S3 `GND` rail | Ground | — | M-to-M (breadboard) | Common ground |
+| **MAX98357A Amp** | `BCLK` | **ESP32-S3 `GPIO17`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_BCLK=17` | M-to-M (breadboard) | Bit clock |
+| **MAX98357A Amp** | `LRC` | **ESP32-S3 `GPIO18`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_LRC=18` | M-to-M (breadboard) | Word clock |
+| **MAX98357A Amp** | `DIN` | **ESP32-S3 `GPIO21`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_DIN=21` | M-to-M (breadboard) | Serial audio data out |
+| **MAX98357A Amp** | `SD` / `GAIN` | Floating (`GAIN`: optional `100 kΩ` to `GND`) | Amp control | — | None / 100 kΩ | Do not ground `SD` |
+| **Speaker (Unverified)** | `+` / `-` | MAX98357A `+` / `-` | Bridged Class-D | — | **Disconnected until verified** | Verify Ω & W first; never ground leads |
+| **PTT Tactile Button** | Pin A / Pin B | **ESP32-S3 `GPIO5`** / `GND` rail | Active-low GPIO | `BOARD_PIN_PTT_BUTTON=5` | M-to-M (breadboard) | Internal pull-up; sends `X-Audio-Trigger: ptt` |
+| **ESP32-CAM (Run Mode)** | `5V` / `GND` | Dedicated `5V` (≥ 1 A) / `GND` | Wi-Fi HTTP (`esp32`) | `firmware/esp32cam` | Power only (**0 wires to S3**) | Pairs with S3 in backend via `SENTRA_CAMERA_PAIRINGS` |
+| **ESP32-CAM (Flash Mode)** | `U0R` / `U0T` / `IO0` | USB-UART `TX` / `RX` / temp `GND` | UART0 Flash | `GPIO3` / `GPIO1` / `GPIO0` | Flash cable only | Remove `IO0 ↔ GND` after flashing & press `RST` |
+
+---
+
+### 5.2 ESP32-S3 I²C (`SDA` / `SCL`) Firmware Settings (`sdkconfig.defaults` & `i2c_bus.c`)
+
+Both the **GY-521 (MPU6050)** and the single forward **VL53L0X** operate on the ESP32-S3's shared I²C master controller using the exact parameters below:
+
+```ini
+# firmware/esp32s3/sdkconfig.defaults
+CONFIG_SENTRA_ENABLE_VL53L0X=y
+CONFIG_SENTRA_VL53L0X_ADDR=0x29
+CONFIG_SENTRA_ENABLE_MPU6050=y
+CONFIG_SENTRA_PIN_I2C_SDA=4
+CONFIG_SENTRA_PIN_I2C_SCL=40
+CONFIG_SENTRA_I2C_FREQ_HZ=100000
+CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT=-1
+```
+
+| I²C Parameter | Configured Value | Firmware Source | Purpose / Constraint |
 | --- | --- | --- | --- |
-| **`GPIO4`** | GY-521 + VL53L0X | I²C `SDA` | Shared 100 kHz bus |
-| **`GPIO5`** | PTT Button | `PTT` (active-low) | Internal pull-up |
-| **`GPIO14`** | INMP441 | `I2S_NUM_0` `SCK` | Mic bit clock |
-| **`GPIO15`** | INMP441 | `I2S_NUM_0` `WS` | Mic word select |
-| **`GPIO16`** | INMP441 | `I2S_NUM_0` `SD` | Mic data in |
-| **`GPIO17`** | MAX98357A | `I2S_NUM_1` `BCLK` | Amp bit clock |
-| **`GPIO18`** | MAX98357A | `I2S_NUM_1` `LRC` | Amp word clock |
-| **`GPIO21`** | MAX98357A | `I2S_NUM_1` `DIN` | Amp data out |
-| **`GPIO40`** | GY-521 + VL53L0X | I²C `SCL` | Shared 100 kHz bus |
+| **SDA GPIO** | **`GPIO4`** | `CONFIG_SENTRA_PIN_I2C_SDA` | Conflict-free with N16R8 Flash/PSRAM, USB, UART0, and discrete I²S |
+| **SCL GPIO** | **`GPIO40`** | `CONFIG_SENTRA_PIN_I2C_SCL` | Conflict-free with N16R8 Flash/PSRAM, USB, UART0, and discrete I²S |
+| **Bus Speed** | **`100000` Hz (100 kHz)** | `CONFIG_SENTRA_I2C_FREQ_HZ` | Standard-mode clock chosen for clean signal integrity over 20–30 cm F-to-M jumpers |
+| **Internal Pull-Ups** | **`GPIO_PULLUP_ENABLE`** on `SDA` & `SCL` | `firmware/esp32s3/src/i2c_bus.c` | Enabled in driver alongside breakout board pull-up resistors |
+| **VL53L0X Address** | **`0x29`** | `CONFIG_SENTRA_VL53L0X_ADDR` / `BOARD_ADDR_VL53L0X_FWD` | Single forward ToF sensor; `XSHUT = -1` assumes onboard pull-up |
+| **MPU6050 Address** | **`0x68`** | `AD0` tied to `GND` (`i2c_bus.c` boot scan) | If `AD0` floats or is tied high, MPU6050 shifts to `0x69` and will not match |
+| **Boot I²C Scan** | Scans `0x03–0x77` at startup | `i2c_bus.c` | Logs `VL53L0X@0x29=OK/MISSING` and `MPU6050@0x68=OK/MISSING` before telemetry starts |
 
-### Reserved ESP32-S3 N16R8 Pins — DO NOT USE
+> **Fail-Closed Sensor Rule:** Absent, invalid, or expired VL53L0X/MPU6050 readings are never promoted as live or clear-path evidence. If either address is missing on the boot I²C scan, inspect the F-to-M jumpers (`SDA=GPIO4`, `SCL=GPIO40`, `AD0=GND`, and VL53L0X `XSHUT` pull-up) before continuing.
+
+---
+
+### 5.3 Reserved ESP32-S3 N16R8 Pins — DO NOT USE
 
 Enforced by `SENTRA_PIN_IS_N16R8_RESERVED(p)` in `firmware/esp32s3/include/board_profile.h`:
 

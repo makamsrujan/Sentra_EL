@@ -1,52 +1,33 @@
-# SENTRA — actual hardware inventory and integration contract
+# SENTRA — Actual Hardware Inventory and Integration Contract
 
-Status: **planning and compatibility verification; not proof of working hardware**.
+Status: **Two-board hardware alignment prepared in code/docs; physical bench verification pending**.
 
-## Fixed architecture
+## Actual Physical Hardware Inventory
 
-- **Headband:** OV2640 camera facing forward, one VL53L0X proximity sensor, GY-521 (MPU6050) motion sensor; reserve space for one VL53L5CX when obtained.
-- **Bag-mounted enclosure:** ESP32-S3 N16R8, power bank, controller wiring and eventual WM8960 codec.
-- **Phone / companion PWA and backend:** receive authenticated JPEG frames and timestamped sensor readings, invoke Gemini for requested scene interpretation, handle memory and conversational responses.
-- **Audio:** initially use phone microphone and wired headset where supported; WM8960 wearable microphone/headset operation remains a separate future hardware milestone.
-- The headband and bag box are connected by a **flexible, strain-relieved harness**. Camera parallel signals must be tested first with a short cable and then at intended length; do not assume long jumper wires work.
+| Part | Count | Role in First Hardware Integration | Status |
+| --- | ---: | --- | --- |
+| **ESP32-S3 N16R8** (16 MB Flash, 8 MB Octal PSRAM) | 1 | Main sensor controller (I²C ToF + IMU, telemetry, future discrete I²S audio) | Ready for Step 1 bring-up (not yet flashed here) |
+| **GY-521 (MPU6050)** 6-axis IMU breakout | 1 | Head tilt / motion on S3 I²C (`0x68`, AD0 low); no magnetometer | Ready for Step 1 bench test |
+| **VL53L0X** forward ToF breakout | 1 | Single forward proximity sensor on S3 I²C (`0x29`, onboard XSHUT pull-up required for `XSHUT = -1`) | Ready for Step 1 bench test |
+| **ESP32-CAM (ESP-32S module, AI-Thinker-style layout)** | 1 | Dedicated Wi-Fi JPEG sender (`firmware/esp32cam/`); ribbon stays on board, **no DVP wiring to S3** | First-candidate AI-Thinker profile ready; clone pinout to verify on bench |
+| **INMP441** I²S MEMS microphone | 1 | Step 4 separate disabled-by-default S3 audio capture (`I2S_NUM_0` RX) | Firmware source compiled on host only; bench test pending |
+| **MAX98357A** I²S mono Class-D amplifier | 1 | Step 4 separate disabled-by-default S3 mono playback (`I2S_NUM_1` TX) | Disabled by default until speaker rating verified |
+| **Small speaker** (impedance & wattage unverified) | 1 | **KEEP DISCONNECTED** until ohm & watt ratings are measured/verified | Blocked on rating confirmation |
+| **5000 mAh USB power bank** | 1 | Power source (no I²C fuel gauge → `batteryPercent: null`) | Verify rail stability under load |
+| **Phone / browser companion** | 1 | Companion PWA + fallback voice/audio I/O | Active fallback for audio |
 
-## Actual procurement status (reported 2026-11-19; confirm against photos)
+### Parts NOT Present (Legacy / Absent)
 
-| Part | Count | Status |
-| --- | ---: | --- |
-| ESP32-S3 N16R8 development board | 1 | Reported obtained |
-| OV2640 camera or ESP32-CAM assembly | 1 | Reported obtained; **exact breakout/interface unknown** |
-| VL53L0X ToF breakout | 1 | Reported obtained |
-| GY-521 breakout containing MPU6050 | 1 | Reported obtained |
-| 5000 mAh USB power bank | 1 | Reported obtained |
-| Wired earphones with microphone | 1 | Reported obtained; headset connector/interface to verify |
-| Enclosure, perfboard, hookup wires and connectors | As purchased | Reported obtained; inventory/voltage checks pending |
-| VL53L5CX multizone depth breakout | 1 | Not yet obtained |
-| WM8960 audio codec breakout | 1 | Not yet obtained |
-| Flexible headband-to-box harness | 1 | Not yet obtained |
+- **No direct OV2640-to-ESP32-S3 DVP camera wiring:** Direct S3 camera code is retained only behind `CONFIG_SENTRA_ENABLE_CAMERA=n` as **[LEGACY]**.
+- **No WM8960 audio codec:** WM8960 code is retained only behind `CONFIG_SENTRA_ENABLE_WM8960=n` as **[LEGACY]**.
+- **No downward VL53L0X or VL53L5CX:** There is **no downward drop-off detection**. `downwardToF` stays `false` and `downwardDistanceMm` stays `null`.
 
-**Do not confuse an ESP32-CAM board with a directly attachable OV2640 breakout.** Record board markings, photographs, camera pinout, accessible GPIO and required power rails before assigning connections.
+## Core Safety & Data Honesty Rules
 
-## Firmware-to-inventory corrections
-
-1. The prototype has **one VL53L0X**, not two. Do not implement or require a second VL53L0X or XSHUT address remapping for this inventory.
-2. VL53L5CX is a **different multizone sensor**; its driver and data contract must be separate from VL53L0X and optional until purchased.
-3. Use actual hardware readings with timestamps, source identity and explicit unavailable/null fields. Never substitute simulator values as physical measurements.
-4. Do not enable local obstacle alerts until real ranging, thresholds, stale-data behavior and fail-safe responses are validated under stationary, supervised tests.
-5. Keep phone audio as a documented temporary fallback; do not claim hands-free wearable wake-word recognition without measured end-to-end evidence.
-6. Keep all proposed pin assignments provisional until exact ESP32-S3 and camera boards are identified. Never wire from an unverified pinout.
-
-## Phase-one acceptance checks
-
-- [ ] Existing TypeScript lint, unit tests and production build pass.
-- [ ] ESP-IDF firmware compiles for the selected board profile.
-- [ ] Confirm board and OV2640 interface from photographs/markings.
-- [ ] ESP32 joins trusted Wi-Fi and sends authenticated, real device heartbeat/telemetry.
-- [ ] One VL53L0X returns valid distance data; disconnected/stale sensor shows unavailable.
-- [ ] GY-521 supplies actual accelerometer/gyro samples.
-- [ ] Camera produces a real JPEG through a verified short connection, then through tested harness length.
-- [ ] Companion app distinguishes phone camera, wearable camera, stale frames and simulated readings.
-- [ ] Phone voice and Gemini requests work end-to-end with errors surfaced clearly.
-- [ ] Supervised, stationary demonstration passes without claiming autonomous safe navigation.
+1. **One forward VL53L0X only:** Never fabricate downward drop-off safety or safe-to-walk claims.
+2. **Absent, invalid, or expired readings are never live:** Disconnected sensors emit `null` and `invalid`/`unavailable`, never `0 cm` or "clear path".
+3. **Separate identities:** ESP32-S3 and ESP32-CAM must each be registered with their own `deviceId` and `X-Device-Token`.
+4. **No silent fallback:** When a paired ESP32-CAM is offline or stale, the backend reports no live frame and never falls back to another camera or simulator image.
+5. **Speaker safety:** Do not attach the unverified speaker to MAX98357A until impedance and power rating are confirmed.
 
 SENTRA is an experimental assistive prototype, not a certified navigation or obstacle-avoidance device.

@@ -17,3 +17,8 @@ firmware/esp32s3/sdkconfig
 firmware/esp32s3/sdkconfig.old
 firmware/esp32s3/managed_components/
 firmware/esp32s3/dependencies.lock
+firmware/esp32cam/sdkconfig
+firmware/esp32cam/sdkconfig.old
+firmware/esp32cam/managed_components/
+firmware/esp32cam/dependencies.lock
+firmware/*/sdkconfig.local

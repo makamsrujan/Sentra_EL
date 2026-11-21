@@ -1,48 +1,40 @@
-# SENTRA — pre-hardware integration status
+# SENTRA Hardware Integration Readiness Status
 
-This document describes **source verified in this repository** and distinguishes what has been software/protocol-tested from what remains **unverified until physical ESP32-S3 assembly and flashing**. Hardware performance has not yet been measured on real silicon.
+Status: **Pre-hardware integration prepared on branch (code + host/backend tests verified; physical bench testing pending)**.
 
-## Baseline Hardware Configuration
+> **Important distinction:** Automated TypeScript, Express, Vitest, and native GCC host C checks validate software contracts and pure-C logic only. **No real ESP32-S3 or ESP32-CAM board has been flashed or bench-tested in this environment.** SENTRA is an experimental assistive prototype — it does **not** perform downward drop-off detection, autonomous navigation, or safe-to-walk verification.
 
-- **Headband:**
-  - 1 × OV2640 camera
-  - 1 × VL53L0X forward ToF sensor (single baseline unit; NO downward VL53L0X sensor)
-  - 1 × GY-521 MPU6050 6-axis IMU (pitch/motion only; NO magnetometer compass heading)
-- **Bag Enclosure:**
-  - 1 × ESP32-S3 N16R8 (16 MB Flash, 8 MB PSRAM)
-  - 1 × 5000 mAh USB power bank and supporting wiring
-- **Optional (disabled by default via Kconfig):**
-  - VL53L5CX multizone depth sensor (`CONFIG_SENTRA_ENABLE_VL53L5CX=n`)
-  - Waveshare WM8960 I²S/I²C audio codec (`CONFIG_SENTRA_ENABLE_WM8960=n`)
+## Actual Two-Board Hardware Baseline
 
-## Implemented & Software-Verified Paths
+1. **Main Controller (ESP32-S3 N16R8 — 16 MB Flash, 8 MB Octal PSRAM):**
+   - **1 × GY-521 (MPU6050)** 6-axis IMU on I²C (`0x68`, AD0 low).
+   - **1 × VL53L0X** forward-facing single-point ToF on the same I²C bus (`0x29`, `XSHUT = -1` only when onboard pull-up is confirmed).
+   - Bench I²C pins in `firmware/esp32s3/sdkconfig.defaults`: `SDA = GPIO4`, `SCL = GPIO40`, `100 kHz`.
+   - Direct S3 camera (`CONFIG_SENTRA_ENABLE_CAMERA=n`), legacy WM8960 (`CONFIG_SENTRA_ENABLE_WM8960=n`), and discrete I²S audio (`CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=n`) stay **disabled by default**.
+   - **No downward ToF sensor.** `downwardToF` remains `false` and `downwardDistanceMm` remains `null`.
+2. **Separate Camera Board (ESP32-CAM, ESP-32S module):**
+   - Separate ESP-IDF v5.3 project under `firmware/esp32cam/` targeting `esp32`.
+   - Uses the **AI-Thinker pin profile as a first candidate** (not yet bench-verified against the physical clone).
+   - The OV2640 ribbon remains on the ESP32-CAM board — **zero DVP wiring** between the ESP32-CAM and ESP32-S3.
+   - Authenticates with its **own** registered `deviceId` (e.g., `ESP32-CAM-SENTRA-001`) and `X-Device-Token`, uploads JPEGs to `POST /api/device/frame`, and sends `X-Boot-Session` so camera-only reboots never stall frame sequence numbers.
+3. **Backend-Only Pairing (Zero Frontend Changes):**
+   - Operator sets `SENTRA_CAMERA_PAIRINGS="ESP32-S3-SENTRA-001=ESP32-CAM-SENTRA-001"` in `.env`.
+   - The unchanged UI continues selecting `ESP32-S3-SENTRA-001`; the backend routes frame status, latest JPEG, visual analysis, and Live Voice wearable frames to the paired ESP32-CAM while keeping sensor telemetry, camera health, and auth independent.
+   - If the paired camera is offline or stale, the backend reports no live frame (HTTP `404` / `410` / `NO_FRESH_IMAGE`) and **never** falls back to another camera or simulator image.
+4. **Discrete Audio (Separate Disabled-by-Default Profile):**
+   - `INMP441` I²S mic (`I2S_NUM_0` RX) + `MAX98357A` I²S mono amp (`I2S_NUM_1` TX) on conflict-free GPIOs, with zero dependency on WM8960.
+   - Phone/browser audio remains the active fallback. Keep the small speaker physically disconnected and `MAX98357A` disabled until speaker impedance and wattage are confirmed.
 
-- React/PWA companion app, Express gateway, SQLite persistence (`sentra.db`), and server-side Gemini integration (`gemini-3.8-flash` primary, `gemini-4-hydrogen` fallback).
-- Device registration, token-authenticated telemetry (`POST /api/device/telemetry`), JPEG frame ingestion (`POST /api/device/frame`), bidirectional config/commands (`GET`/`POST /api/device/config`, `POST /api/device/command`, `GET /api/device/poll`, `POST /api/device/ack`), and SSE streaming.
-- Shared TypeScript sensor fusion module (`evaluateSensorFusion`, `FusionAlertPrioritizer`) enforcing timestamp freshness, `valid | invalid | stale | unavailable` states, configurable experimental proximity thresholds, `downwardDropOffCapable: false` when baseline forward-only VL53L0X is active, and explicit Planned SLAM contract.
-- ESP32-S3 firmware (`firmware/esp32s3/`) implementing mutex-protected I²C (`i2c_bus.c`), single forward VL53L0X driver (`vl53l0x.c`), GY-521 MPU6050 driver + stationary gyro calibration (`mpu6050.c`), optional VL53L5CX stub (`vl53l5cx_optional.c`), runtime NVS config (`sentra_nvs_config.c`), PSRAM-aware OV2640 driver (`camera_driver.c`), telemetry + command poll/ack loop (`device_telemetry.c`, `audio_http.c`, `main.c`). Pure-C sensor math/validation logic is unit-tested via host `gcc`.
+## Ordered Bring-Up Sequence
 
-## Not Yet Proven on Silicon
+1. **Step 1 — S3 Sensor Bring-Up:** Flash `firmware/esp32s3` with `sdkconfig.defaults`, verify serial boot I²C scan (`0x29` + `0x68`), run stationary measured-distance and IMU bench checks, then register `ESP32-S3-SENTRA-001` and verify live telemetry.
+2. **Step 2 — ESP32-CAM Bring-Up:** Flash `firmware/esp32cam`, run a **first local JPEG capture test** (blank Wi-Fi/token) over serial, verify AI-Thinker pin compatibility, then register `ESP32-CAM-SENTRA-001` with its own token and verify Wi-Fi JPEG uploads.
+3. **Step 3 — Backend Pairing Verification:** Set `SENTRA_CAMERA_PAIRINGS`, restart backend, verify each board independently via API (`/api/health`, `/api/device/status`, `/api/device/frame/status`, `/api/device/frame/latest`), and test independent disconnect and camera-only reboot.
+4. **Step 4 — Discrete Audio Bench Tests (Optional / Later):** Test `INMP441` capture alone first using `sdkconfig.defaults.audio_bench`. Only connect the speaker and enable `MAX98357A` after confirming speaker impedance and wattage.
 
-- Physical compilation & flashing on an actual ESP32-S3 N16R8 (check the GitHub Actions `esp32s3` job running `espressif/esp-idf-ci-action` for ELF compilation checks).
-- Real I²C signal integrity, pin assignments, and headband-to-bag cable performance for OV2640, VL53L0X, and MPU6050.
-- Physical OV2640 JPEG capture quality across candidate resolutions (QVGA/VGA/SVGA) and thermal/power behavior on the 5000 mAh bank.
-- Optional WM8960 headset capture/playback and optional VL53L5CX multizone depth ranging (both disabled by default).
-- Independent hands-free embedded "Hey SENTRA" wake-word detection (currently browser foreground Web Speech API; embedded wake word is not implemented).
-- Real-world walking guidance, downward drop-off guarantees, SLAM localization, or certified obstacle safety.
+## Toolchain Commands
 
-## Hardware Arrival Sequence
-
-1. Confirm board pinout and headband-to-bag cable continuity; verify provisional `Kconfig.projbuild` GPIO defaults match wiring.
-2. Flash ESP32-S3 (`idf.py set-target esp32s3 && idf.py build flash monitor`) with Wi-Fi + NVS device credentials first.
-3. Verify `GET /api/device/poll` and `POST /api/device/telemetry` connectivity over local Wi-Fi.
-4. Validate single forward VL53L0X ranging against measured distances and tune experimental alert threshold via `POST /api/device/config`.
-5. Validate GY-521 MPU6050 stationary calibration and pitch axis sign; trigger `RECALIBRATE_IMU` if orientation mounts differ.
-6. Enable OV2640 (`CONFIG_SENTRA_ENABLE_CAMERA=y`) and validate short-cable vs headband-cable JPEG transfers & PSRAM allocation.
-7. Run supervised, stationary indoor integration checks using the diagnostics checklist. SENTRA is not a certified mobility aid.
-
-## Toolchain
-
-- Node.js 22: `npm ci && npm run lint && npm test && npm run build`
-- ESP-IDF v5.3: `idf.py set-target esp32s3 && idf.py build` inside `firmware/esp32s3`
-- Simulator protocol check: `SENTRA_OPERATOR_TOKEN=local-test SENTRA_SIMULATOR_ENABLED=true npm run dev` and `SENTRA_OPERATOR_TOKEN=local-test node simulator/esp32_sim.mjs`
+- Application checks (Node.js 22): `npm ci && npm run lint && npm test && npm run build`
+- ESP32-S3 firmware (ESP-IDF v5.3): `cd firmware/esp32s3 && idf.py set-target esp32s3 && idf.py build`
+- ESP32-CAM firmware (ESP-IDF v5.3): `cd firmware/esp32cam && idf.py set-target esp32 && idf.py build`
+- Simulator smoke test (labeled simulated data only): `SENTRA_OPERATOR_TOKEN=local-test SENTRA_SIMULATOR_ENABLED=true npm run dev` + `SENTRA_OPERATOR_TOKEN=local-test node simulator/esp32_sim.mjs`

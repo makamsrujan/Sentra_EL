@@ -19,6 +19,48 @@ const DEFAULT_HEARTBEAT_TIMEOUT_MS = Number(process.env.SENTRA_HEARTBEAT_TIMEOUT
 const FRAME_STALE_THRESHOLD_MS = Number(process.env.SENTRA_FRAME_STALE_MS || 5000);
 const MAX_ACTION_QUEUE_PER_DEVICE = 20;
 
+export function parseCameraPairings(raw?: string | Record<string, string> | null): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!raw) return result;
+  if (typeof raw === 'object') {
+    for (const [k, v] of Object.entries(raw)) {
+      const s3 = k.trim();
+      const cam = typeof v === 'string' ? v.trim() : '';
+      if (s3 && cam && s3 !== cam) {
+        result[s3] = cam;
+      }
+    }
+    return result;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return result;
+  if (trimmed.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      for (const [k, v] of Object.entries(parsed)) {
+        const s3 = k.trim();
+        const cam = typeof v === 'string' ? v.trim() : '';
+        if (s3 && cam && s3 !== cam) {
+          result[s3] = cam;
+        }
+      }
+      return result;
+    } catch {
+      return result;
+    }
+  }
+  for (const entry of trimmed.split(',')) {
+    const idx = entry.indexOf('=');
+    if (idx <= 0) continue;
+    const s3 = entry.slice(0, idx).trim();
+    const cam = entry.slice(idx + 1).trim();
+    if (s3 && cam && s3 !== cam) {
+      result[s3] = cam;
+    }
+  }
+  return result;
+}
+
 interface FrameEntry {
   buffer: Buffer;
   mimeType: 'image/jpeg';
@@ -48,6 +90,8 @@ interface InternalDeviceState {
   runtimeConfig: DeviceRuntimeConfig;
   frame: FrameEntry | null;
   frameSequenceCounter: number;
+  frameBootSession: string | null;
+  lastClientFrameSequence: number | null;
   actions: WearableActionItem[];
   alertPrioritizer: FusionAlertPrioritizer;
   activeGoal: GoalTask | null;
@@ -59,12 +103,28 @@ export class DeviceGateway {
   private sseClients = new Set<Response>();
   private sweepTimer: NodeJS.Timeout | null = null;
   private heartbeatTimeoutMs: number;
+  private cameraPairings = new Map<string, string>();
+  private reverseCameraPairings = new Map<string, Set<string>>();
 
-  constructor(store: SentraEventStore, heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS) {
+  constructor(
+    store: SentraEventStore,
+    heartbeatTimeoutMs = DEFAULT_HEARTBEAT_TIMEOUT_MS,
+    cameraPairings?: Record<string, string> | string
+  ) {
     this.store = store;
     this.heartbeatTimeoutMs = Number.isFinite(heartbeatTimeoutMs) && heartbeatTimeoutMs >= 2000
       ? heartbeatTimeoutMs
       : 15000;
+    const pairingMap = parseCameraPairings(
+      cameraPairings !== undefined ? cameraPairings : process.env.SENTRA_CAMERA_PAIRINGS
+    );
+    for (const [s3Id, camId] of Object.entries(pairingMap)) {
+      this.cameraPairings.set(s3Id, camId);
+      if (!this.reverseCameraPairings.has(camId)) {
+        this.reverseCameraPairings.set(camId, new Set());
+      }
+      this.reverseCameraPairings.get(camId)!.add(s3Id);
+    }
 
     // Seed registered devices from SQLite (all start disconnected with null readings)
     for (const dev of this.store.listDevices()) {
@@ -87,6 +147,26 @@ export class DeviceGateway {
 
   public getHeartbeatTimeoutMs(): number {
     return this.heartbeatTimeoutMs;
+  }
+
+  public getCameraPairings(): Record<string, string> {
+    return Object.fromEntries(this.cameraPairings.entries());
+  }
+
+  public getPairedCameraDeviceId(deviceId: string): string | null {
+    return this.cameraPairings.get(deviceId) ?? null;
+  }
+
+  public getPairedControllerDeviceIds(cameraDeviceId: string): string[] {
+    return Array.from(this.reverseCameraPairings.get(cameraDeviceId) ?? []);
+  }
+
+  public isPairedCameraTarget(deviceId: string): boolean {
+    return this.reverseCameraPairings.has(deviceId);
+  }
+
+  public resolveFrameSourceDeviceId(deviceId: string): string {
+    return this.cameraPairings.get(deviceId) ?? deviceId;
   }
 
   public isSimulatorEnabled(): boolean {
@@ -152,6 +232,8 @@ export class DeviceGateway {
       runtimeConfig: { ...DEFAULT_DEVICE_RUNTIME_CONFIG },
       frame: null,
       frameSequenceCounter: 0,
+      frameBootSession: null,
+      lastClientFrameSequence: null,
       actions: [],
       alertPrioritizer: new FusionAlertPrioritizer(),
       activeGoal: null,
@@ -205,23 +287,21 @@ export class DeviceGateway {
     if (!providedToken || !providedToken.trim()) return false;
     const clean = providedToken.trim();
 
+    if (deviceId) {
+      const stored = this.store.getDevice(deviceId);
+      if (stored?.tokenHash) {
+        const providedHash = Buffer.from(hashToken(clean));
+        const expectedHash = Buffer.from(stored.tokenHash);
+        return providedHash.length === expectedHash.length && crypto.timingSafeEqual(providedHash, expectedHash);
+      }
+    }
+
     const envToken = process.env.SENTRA_DEVICE_TOKEN?.trim();
     if (envToken && envToken.length > 0) {
       const a = Buffer.from(hashToken(clean));
       const b = Buffer.from(hashToken(envToken));
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) {
         return true;
-      }
-    }
-
-    if (deviceId) {
-      const stored = this.store.getDevice(deviceId);
-      if (stored?.tokenHash) {
-        const providedHash = Buffer.from(hashToken(clean));
-        const expectedHash = Buffer.from(stored.tokenHash);
-        if (providedHash.length === expectedHash.length && crypto.timingSafeEqual(providedHash, expectedHash)) {
-          return true;
-        }
       }
     }
 
@@ -515,7 +595,9 @@ export class DeviceGateway {
     if (!state) return null;
 
     if (params.command === 'CAPTURE_FRAME') {
-      return this.enqueueAction(params.deviceId, {
+      const pairedCamId = this.getPairedCameraDeviceId(params.deviceId);
+      const targetId = pairedCamId && this.devices.has(pairedCamId) ? pairedCamId : params.deviceId;
+      return this.enqueueAction(targetId, {
         type: 'capture_frame',
         text: params.text || 'Capture and upload a fresh JPEG frame immediately.',
         priority: params.priority ?? 'normal',
@@ -558,6 +640,7 @@ export class DeviceGateway {
     deviceId: string;
     buffer: Buffer;
     sequence?: number;
+    bootSessionId?: string;
     sourceMode: 'hardware' | 'simulator';
   }): { ok: boolean; error?: string; status?: WearableFrameStatus } {
     const now = Date.now();
@@ -591,10 +674,30 @@ export class DeviceGateway {
       });
     }
 
-    const seq = params.sequence !== undefined ? params.sequence : ++state.frameSequenceCounter;
-    if (state.frame && params.sequence !== undefined && params.sequence <= state.frame.sequence) {
+    const bootSession = params.bootSessionId?.trim() || null;
+    const isNewBootSession = Boolean(bootSession && bootSession !== state.frameBootSession);
+
+    if (isNewBootSession) {
+      state.frameBootSession = bootSession;
+      state.lastClientFrameSequence = null;
+    } else if (
+      state.frame &&
+      params.sequence !== undefined &&
+      state.lastClientFrameSequence !== null &&
+      params.sequence <= state.lastClientFrameSequence
+    ) {
       return { ok: true, status: this.getFrameStatus(params.deviceId) };
     }
+
+    if (params.sequence !== undefined) {
+      state.lastClientFrameSequence = params.sequence;
+    }
+
+    // Server-assigned strictly monotonic sequence guarantees camera-only reboots never stall UI refresh
+    const seq =
+      params.sequence !== undefined && !bootSession && params.sequence > state.frameSequenceCounter
+        ? (state.frameSequenceCounter = params.sequence)
+        : ++state.frameSequenceCounter;
 
     const wasConnected = state.connected;
     state.connected = true;
@@ -622,24 +725,81 @@ export class DeviceGateway {
     const frameStatus = this.getFrameStatus(params.deviceId);
     this.broadcast('frame', frameStatus);
     this.broadcast('telemetry', this.toLiveState(state, now));
+
+    // Propagate paired camera updates to S3 controller subscribers preserving controller deviceId
+    for (const controllerId of this.getPairedControllerDeviceIds(params.deviceId)) {
+      const controllerState = this.devices.get(controllerId);
+      if (controllerState && !( !controllerState.isSimulator && state.isSimulator )) {
+        this.broadcast('frame', this.getFrameStatus(controllerId));
+        this.broadcast('telemetry', this.toLiveState(controllerState, now));
+      }
+    }
+
     return { ok: true, status: frameStatus };
   }
 
-  public getLatestFrame(deviceId: string): {
+  public getLatestFrame(
+    deviceId: string,
+    options?: { excludeSimulator?: boolean }
+  ): {
     available: boolean;
     stale: boolean;
+    cameraConnected: boolean;
+    sourceDeviceId: string;
     frame: FrameEntry | null;
     ageMs: number | null;
   } {
-    const state = this.devices.get(deviceId);
+    const now = Date.now();
+    const controllerState = this.devices.get(deviceId);
+    const pairedCamId = this.getPairedCameraDeviceId(deviceId);
+    const sourceId = pairedCamId ?? deviceId;
+    const state = this.devices.get(sourceId);
+
     if (!state || !state.frame) {
-      return { available: false, stale: true, frame: null, ageMs: null };
+      return {
+        available: false,
+        stale: true,
+        cameraConnected: false,
+        sourceDeviceId: sourceId,
+        frame: null,
+        ageMs: null,
+      };
     }
+
+    // Never allow simulator frames when excluded or paired to a non-simulator hardware controller
+    const controllerIsHardware = controllerState ? !controllerState.isSimulator : !deviceId.startsWith('SIM-');
+    if (state.isSimulator && (options?.excludeSimulator || (pairedCamId && controllerIsHardware))) {
+      return {
+        available: false,
+        stale: true,
+        cameraConnected: false,
+        sourceDeviceId: sourceId,
+        frame: null,
+        ageMs: null,
+      };
+    }
+
+    const sourceMode = this.computeSourceMode(state, now);
+    const cameraConnected = sourceMode !== 'disconnected';
     const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
-    const ageMs = Math.max(0, Date.now() - state.frame.receivedAt);
+    const ageMs = Math.max(0, now - state.frame.receivedAt);
+
+    if (!cameraConnected) {
+      return {
+        available: false,
+        stale: true,
+        cameraConnected: false,
+        sourceDeviceId: sourceId,
+        frame: null,
+        ageMs,
+      };
+    }
+
     return {
       available: true,
       stale: ageMs > staleThreshold,
+      cameraConnected: true,
+      sourceDeviceId: sourceId,
       frame: state.frame,
       ageMs,
     };
@@ -647,8 +807,13 @@ export class DeviceGateway {
 
   public getFrameStatus(deviceId: string): WearableFrameStatus {
     const now = Date.now();
-    const state = this.devices.get(deviceId);
-    if (!state || !state.frame) {
+    const controllerState = this.devices.get(deviceId);
+    const pairedCamId = this.getPairedCameraDeviceId(deviceId);
+    const sourceId = pairedCamId ?? deviceId;
+    const state = this.devices.get(sourceId);
+
+    const controllerIsHardware = controllerState ? !controllerState.isSimulator : !deviceId.startsWith('SIM-');
+    if (!state || !state.frame || (pairedCamId && controllerIsHardware && state.isSimulator)) {
       return {
         ok: true,
         deviceId,
@@ -660,6 +825,22 @@ export class DeviceGateway {
         imageFormat: null,
         sizeBytes: null,
         connectionStatus: state ? this.computeSourceMode(state, now) : 'disconnected',
+      };
+    }
+
+    const connectionStatus = this.computeSourceMode(state, now);
+    if (connectionStatus === 'disconnected') {
+      return {
+        ok: true,
+        deviceId,
+        frameAvailable: false,
+        sequence: null,
+        lastReceivedTimestamp: null,
+        frameAgeMs: null,
+        stale: true,
+        imageFormat: null,
+        sizeBytes: null,
+        connectionStatus: 'disconnected',
       };
     }
 
@@ -675,7 +856,7 @@ export class DeviceGateway {
       stale: ageMs > staleThreshold,
       imageFormat: state.frame.mimeType,
       sizeBytes: state.frame.sizeBytes,
-      connectionStatus: this.computeSourceMode(state, now),
+      connectionStatus,
     };
   }
 
@@ -779,6 +960,13 @@ export class DeviceGateway {
             createdAt: now,
           });
           this.broadcast('telemetry', this.toLiveState(state, now));
+          for (const controllerId of this.getPairedControllerDeviceIds(state.deviceId)) {
+            const controllerState = this.devices.get(controllerId);
+            if (controllerState) {
+              this.broadcast('frame', this.getFrameStatus(controllerId));
+              this.broadcast('telemetry', this.toLiveState(controllerState, now));
+            }
+          }
         }
       }
     }
@@ -796,8 +984,52 @@ export class DeviceGateway {
   private toLiveState(state: InternalDeviceState, now = Date.now()): DeviceLiveState {
     const sourceMode = this.computeSourceMode(state, now);
     const connected = sourceMode !== 'disconnected';
-    const frameAgeMs = state.frame ? Math.max(0, now - state.frame.receivedAt) : null;
-    const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
+
+    const pairedCamId = this.getPairedCameraDeviceId(state.deviceId);
+    let frameAvailable = false;
+    let frameSequence: number | null = null;
+    let frameTimestamp: number | null = null;
+    let frameAgeMs: number | null = null;
+    let frameStale = true;
+    let frameFormat: 'image/jpeg' | null = null;
+    let effectiveSensorHealth: SensorHealthReport = { ...state.sensorHealth };
+    let effectiveCapabilities: DeviceCapabilities = { ...state.capabilities };
+
+    if (pairedCamId) {
+      const camState = this.devices.get(pairedCamId);
+      const camBlockedSim = Boolean(!state.isSimulator && camState?.isSimulator);
+      const camMode = camState && !camBlockedSim ? this.computeSourceMode(camState, now) : 'disconnected';
+      if (camState && !camBlockedSim && camMode !== 'disconnected' && camState.frame) {
+        const staleThreshold = camState.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
+        frameAgeMs = Math.max(0, now - camState.frame.receivedAt);
+        frameStale = frameAgeMs > staleThreshold;
+        frameAvailable = true;
+        frameSequence = camState.frame.sequence;
+        frameTimestamp = camState.frame.receivedAt;
+        frameFormat = camState.frame.mimeType;
+        effectiveCapabilities.camera = true;
+        effectiveSensorHealth.camera = frameStale ? 'stale' : 'valid';
+      } else {
+        frameAvailable = false;
+        frameStale = true;
+        effectiveSensorHealth.camera = 'unavailable';
+      }
+    } else if (state.frame && connected) {
+      const staleThreshold = state.runtimeConfig.sensorStaleMs || FRAME_STALE_THRESHOLD_MS;
+      frameAgeMs = Math.max(0, now - state.frame.receivedAt);
+      frameStale = frameAgeMs > staleThreshold;
+      frameAvailable = true;
+      frameSequence = state.frame.sequence;
+      frameTimestamp = state.frame.receivedAt;
+      frameFormat = state.frame.mimeType;
+      if (frameStale && effectiveSensorHealth.camera === 'valid') {
+        effectiveSensorHealth.camera = 'stale';
+      }
+    } else if (state.frame && !connected) {
+      frameAvailable = false;
+      frameStale = true;
+      effectiveSensorHealth.camera = 'unavailable';
+    }
 
     return {
       deviceId: state.deviceId,
@@ -814,16 +1046,16 @@ export class DeviceGateway {
       earphoneConnected: state.earphoneConnected,
       audioVolume: state.audioVolume,
       sensors: state.sensors,
-      sensorHealth: state.sensorHealth,
+      sensorHealth: effectiveSensorHealth,
       diagnostics: state.diagnostics,
-      capabilities: state.capabilities,
+      capabilities: effectiveCapabilities,
       runtimeConfig: state.runtimeConfig,
-      frameAvailable: Boolean(state.frame),
-      frameSequence: state.frame?.sequence ?? null,
-      frameTimestamp: state.frame?.receivedAt ?? null,
+      frameAvailable,
+      frameSequence,
+      frameTimestamp,
       frameAgeMs,
-      frameStale: frameAgeMs === null || frameAgeMs > staleThreshold,
-      frameFormat: state.frame?.mimeType ?? null,
+      frameStale,
+      frameFormat,
       pendingActionsCount: state.actions.filter((a) => a.acknowledgedAt === null).length,
     };
   }
@@ -834,9 +1066,10 @@ export class DeviceGateway {
       const state = this.devices.get(deviceId);
       return state ? this.toLiveState(state, now) : null;
     }
-    // Prefer connected hardware, then any connected, then first registered
+    // Prefer connected primary hardware controllers over paired-camera-only nodes, then any connected, then first registered
     const all = this.listLiveStates();
     return (
+      all.find((d) => d.sourceMode === 'hardware' && !this.isPairedCameraTarget(d.deviceId)) ||
       all.find((d) => d.sourceMode === 'hardware') ||
       all.find((d) => d.connected) ||
       all[0] ||

@@ -1,0 +1,23 @@
+# Separate disabled-by-default ESP-IDF bench profile for INMP441 + MAX98357A (NO WM8960).
+# Apply ONLY after Step 1 sensor bring-up passes:
+#   idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.audio_bench" reconfigure
+#
+# SAFETY: Keep CONFIG_SENTRA_ENABLE_MAX98357A_AMP=n and leave the speaker physically
+# disconnected until its impedance and wattage rating are confirmed.
+
+CONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=y
+CONFIG_SENTRA_ENABLE_INMP441_MIC=y
+CONFIG_SENTRA_ENABLE_MAX98357A_AMP=n
+CONFIG_SENTRA_ENABLE_WM8960=n
+
+# Verified conflict-free GPIOs (separate from I2C GPIO4/40, PTT GPIO5, and N16R8 reserved pins)
+CONFIG_SENTRA_PIN_INMP441_SCK=14
+CONFIG_SENTRA_PIN_INMP441_WS=15
+CONFIG_SENTRA_PIN_INMP441_SD=16
+CONFIG_SENTRA_PIN_MAX98357A_BCLK=17
+CONFIG_SENTRA_PIN_MAX98357A_LRC=18
+CONFIG_SENTRA_PIN_MAX98357A_DIN=21
+
+# Enable one bench test at a time in menuconfig
+CONFIG_SENTRA_AUDIO_BENCH_TEST_MIC=n
+CONFIG_SENTRA_AUDIO_BENCH_TEST_TONE=n

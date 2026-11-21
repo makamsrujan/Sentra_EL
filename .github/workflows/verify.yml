@@ -1,7 +1,8 @@
 name: Verify SENTRA code
+
 on:
   push:
-    branches: [main, "sentra/**"]
+    branches: [main, "sentra/**", "feat/**"]
   pull_request:
   workflow_dispatch:
 
@@ -22,7 +23,7 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      - name: Native C pre-hardware firmware unit suite (GCC -Werror)
+      - name: Native C pre-hardware firmware unit suites (GCC -Werror)
         run: |
           gcc -Wall -Wextra -Werror -DSENTRA_FIRMWARE_HOST_TEST \
             -Ifirmware/esp32s3/include -Ifirmware/esp32s3/tests \
@@ -31,8 +32,27 @@ jobs:
             firmware/esp32s3/src/mpu6050.c \
             firmware/esp32s3/src/obstacle_awareness.c \
             firmware/esp32s3/src/local_alerts.c \
+            firmware/esp32s3/src/i2s_audio.c \
             firmware/esp32s3/src/device_telemetry.c \
             -lm -o /tmp/sentra_fw_test && /tmp/sentra_fw_test
+          gcc -Wall -Wextra -Werror -DSENTRA_FIRMWARE_HOST_TEST \
+            -DCONFIG_SENTRA_ENABLE_AUDIO_I2S_DISCRETE=1 \
+            -DCONFIG_SENTRA_ENABLE_INMP441=1 \
+            -DCONFIG_SENTRA_ENABLE_MAX98357A=1 \
+            -Ifirmware/esp32s3/include -Ifirmware/esp32s3/tests \
+            firmware/esp32s3/tests/test_firmware.c \
+            firmware/esp32s3/src/vl53l0x.c \
+            firmware/esp32s3/src/mpu6050.c \
+            firmware/esp32s3/src/obstacle_awareness.c \
+            firmware/esp32s3/src/local_alerts.c \
+            firmware/esp32s3/src/i2s_audio.c \
+            firmware/esp32s3/src/device_telemetry.c \
+            -lm -o /tmp/sentra_fw_audio_test && /tmp/sentra_fw_audio_test
+          gcc -Wall -Wextra -Werror \
+            -Ifirmware/esp32cam/main \
+            firmware/esp32cam/tests/test_cam_logic.c \
+            firmware/esp32cam/main/cam_sender_logic.c \
+            -o /tmp/sentra_cam_test && /tmp/sentra_cam_test
       - name: Simulator-labeled HTTP API smoke
         env:
           SENTRA_OPERATOR_TOKEN: ci-local-test-token
@@ -62,3 +82,15 @@ jobs:
           esp_idf_version: release-v5.3
           target: esp32s3
           path: firmware/esp32s3
+
+  esp32cam:
+    name: ESP32-CAM ESP-IDF v5.3 firmware build (not a hardware test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build ESP-IDF v5.3 firmware (esp32 target)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: release-v5.3
+          target: esp32
+          path: firmware/esp32cam

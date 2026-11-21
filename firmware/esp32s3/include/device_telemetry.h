@@ -22,6 +22,7 @@ typedef struct {
     bool imu_ready;
     bool forward_tof_ready;
     bool wm8960_ready;
+    bool audio_output_ready;
     bool vl53l5cx_ready;
 
     bool tof_fresh;
@@ -44,6 +45,7 @@ void sentra_telemetry_set_camera_initialized(bool value);
 void sentra_telemetry_set_imu_initialized(bool value);
 void sentra_telemetry_set_forward_tof_initialized(bool value);
 void sentra_telemetry_set_wm8960_initialized(bool value);
+void sentra_telemetry_set_audio_output_initialized(bool value);
 void sentra_telemetry_set_vl53l5cx_initialized(bool value);
 void sentra_telemetry_update_forward_tof(const vl53l0x_reading_t *reading, sentra_obstacle_level_t obstacle_level);
 void sentra_telemetry_task(void *argument);
