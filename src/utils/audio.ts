@@ -3,7 +3,6 @@
 let audioCtx: AudioContext | null = null;
 let audioMuted = false;
 let audioVolume = 0.9;
-let audioLang = 'en-IN';
 let activeSpeechToken = 0;
 let activeEndSafetyTimer: ReturnType<typeof setTimeout> | null = null;
 let speakingState = false;
@@ -26,7 +25,7 @@ export function subscribeSpeakingState(listener: (speaking: boolean) => void): (
   };
 }
 
-export function setAudioConfig(config: { muted?: boolean; volume?: number; lang?: string }) {
+export function setAudioConfig(config: { muted?: boolean; volume?: number }) {
   if (typeof config.muted === 'boolean') {
     audioMuted = config.muted;
     if (audioMuted) {
@@ -39,13 +38,10 @@ export function setAudioConfig(config: { muted?: boolean; volume?: number; lang?
       stopSpeaking();
     }
   }
-  if (typeof config.lang === 'string' && config.lang.trim()) {
-    audioLang = config.lang.trim();
-  }
 }
 
-export function getAudioConfig(): { muted: boolean; volume: number; lang: string } {
-  return { muted: audioMuted, volume: audioVolume, lang: audioLang };
+export function getAudioConfig(): { muted: boolean; volume: number } {
+  return { muted: audioMuted, volume: audioVolume };
 }
 
 function getAudioContext(): AudioContext | null {
@@ -147,7 +143,6 @@ export function playChime(type: 'start_listen' | 'stop_listen' | 'found' | 'haza
 export interface SpeakOptions {
   rate?: number;
   volume?: number;
-  lang?: string;
   force?: boolean;
   onEnd?: () => void;
   onError?: (reason: string) => void;
@@ -198,36 +193,21 @@ export function speakText(
     const rate = opts.rate ?? 1.05;
     const volume = Math.max(0, Math.min(1, opts.volume ?? audioVolume));
 
-    const targetLang = opts.lang || audioLang || 'en-IN';
-    const langPrefix = targetLang.split('-')[0].toLowerCase();
-
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.rate = rate;
     utterance.pitch = 1.0;
     utterance.volume = volume;
-    utterance.lang = targetLang;
 
     const voices = window.speechSynthesis.getVoices();
     const preferredVoice =
       voices.find(
         (v) =>
-          v.lang.toLowerCase() === targetLang.toLowerCase() &&
+          v.lang.startsWith('en') &&
           (v.name.includes('Natural') ||
             v.name.includes('Neural') ||
             v.name.includes('Google') ||
             v.name.includes('Siri'))
-      ) ||
-      voices.find((v) => v.lang.toLowerCase() === targetLang.toLowerCase()) ||
-      voices.find(
-        (v) =>
-          v.lang.toLowerCase().startsWith(langPrefix) &&
-          (v.name.includes('Natural') ||
-            v.name.includes('Neural') ||
-            v.name.includes('Google') ||
-            v.name.includes('Siri'))
-      ) ||
-      voices.find((v) => v.lang.toLowerCase().startsWith(langPrefix)) ||
-      voices.find((v) => v.lang.startsWith('en'));
+      ) || voices.find((v) => v.lang.startsWith('en'));
 
     if (preferredVoice) {
       utterance.voice = preferredVoice;
