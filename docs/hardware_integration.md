@@ -20,7 +20,7 @@
 | **Microphone** | **INMP441** omnidirectional MEMS I²S mic | 16 kHz mono 16-bit PCM voice capture (wearable input) | Stationary breadboard | `I2S_NUM_0` RX (`GPIO14/15/16`) |
 | **Audio Amplifier** | **MAX98357A** mono Class-D I²S amp | 24 kHz mono WAV playback (`gemini-3.8-live` replies & alerts) | Stationary breadboard | `I2S_NUM_1` TX (`GPIO17/18/21`) |
 | **Speaker** | Small mono speaker (**impedance Ω & wattage W unverified**) | Wearable voice output | Connected to MAX98357A `+`/`-` **only after rating is verified** | Bridged Class-D out (never ground either lead) |
-| **Push-to-Talk (PTT) Button** | Momentary tactile push button (optional in Stage 1, used in Stage 3–4) | Hold to record from INMP441, release to send `X-Audio-Trigger: ptt` | Stationary breadboard | `GPIO5` ↔ `GND` (active-low internal pull-up) |
+| **Push-to-Talk (PTT) Button** | Momentary tactile push button (optional in Stage 1, used in Stage 3–4) | Debounced press starts a 3.5 s INMP441 recording and uploads with `X-Audio-Trigger: ptt` | Stationary breadboard | `GPIO5` ↔ `GND` (active-low internal pull-up) |
 
 *\*`XSHUT = -1` is valid **only** on a single VL53L0X breakout with a confirmed onboard pull-up resistor to `3.3V`/`2.8V`. Do not drive an unverified `XSHUT` pin.*
 
@@ -168,7 +168,7 @@ ESP32-S3 N16R8                      INMP441 Breakout
 | --- | --- | --- | --- |
 | **`VDD`** | Breadboard **`3.3V` rail** | — | Strictly 3.3V (5V damages module) |
 | **`GND`** | Breadboard **`GND` rail** | — | Ground |
-| **`L/R`** | Breadboard **`GND` rail** | Mono Left channel (`I2S_STD_SLOT_LEFT`) | Must be tied to `GND` (not left floating) |
+| **`L/R`** | Breadboard **`GND` rail** | Mono Left channel (`I2S_CHANNEL_FMT_ONLY_LEFT`) | Must be tied to `GND` (not left floating) |
 | **`SCK`** | ESP32-S3 **`GPIO14`** | `CONFIG_SENTRA_PIN_INMP441_SCK=14` | Bit clock |
 | **`WS`** | ESP32-S3 **`GPIO15`** | `CONFIG_SENTRA_PIN_INMP441_WS=15` | Word select |
 | **`SD`** | ESP32-S3 **`GPIO16`** | `CONFIG_SENTRA_PIN_INMP441_SD=16` | Serial audio data into S3 |
@@ -215,7 +215,7 @@ ESP32-S3 N16R8                      Momentary Tactile Button
 
 | Button Pin | ESP32-S3 / Breadboard | Firmware Symbol | Behavior |
 | --- | --- | --- | --- |
-| **Pin A** | ESP32-S3 **`GPIO5`** | `BOARD_PIN_PTT_BUTTON` (`5`) | Hold to capture INMP441 WAV; release uploads with `X-Audio-Trigger: ptt` + `X-Boot-Session` to backend **`gemini-3.8-live`** bridge |
+| **Pin A** | ESP32-S3 **`GPIO5`** | `CONFIG_SENTRA_PIN_ACTION_BUTTON=5` / `BOARD_PIN_PTT_BUTTON` (`5`) | Debounced press (50 ms low) records 3.5 s INMP441 WAV and uploads with `X-Audio-Trigger: ptt` + `X-Boot-Session` to backend **`gemini-3.8-live`** bridge |
 | **Pin B** | Breadboard **`GND` rail** | — | Active-low closure |
 
 ---
@@ -343,11 +343,9 @@ Assemble all stationary modules first **with all USB / power cables unplugged**:
    - Run one M-to-M jumper from ESP32-S3 **`GPIO4`** into the **SDA Hub row**, and one from **`GPIO40`** into the **SCL Hub row**.
    - Keeping a dedicated hub row lets you plug/unplug the moving sensors cleanly without stressing the ESP32-S3 header pins.
 
-4. **Place and Power the Stationary ESP32-CAM (Zone D — Isolated):**
-   - Seat the **ESP32-CAM** on an isolated section (or its own mini breadboard) with the OV2640 ribbon kept firmly latched in its onboard connector and angled clear of wires.
-   - Feed **`5V` (≥ 1 A)** and **`GND`** strictly from an isolated `5V` rail or separate USB power supply (never from the S3 `3V3` pin).
-   - Confirm **zero** signal wires run between the ESP32-CAM and ESP32-S3, and confirm `IO0` is **not** grounded during normal operation.
-   - *(Tip: If you flash the ESP32-CAM with an ESP32-CAM-MB USB base, simply lift the ESP32-CAM off the breadboard, flash it on the MB base, then re-seat it into the `5V`/`GND` breadboard socket for run mode.)*
+4. **Place and Power the Separate ESP32-CAM (Zone D — Isolated, or Off-Breadboard):**
+   - **Recommended for aiming:** Keep the **ESP32-CAM off the breadboard** on an **ESP32-CAM-MB** USB base (or tethered via short `5V`/`GND` F-to-M jumpers to an isolated `5V` ≥ 1 A supply) so the OV2640 lens can point forward alongside your mobile sensors instead of pointing straight up.
+   - **Temporary bench option:** If you seat the ESP32-CAM on an isolated breadboard section during initial flashing, keep the OV2640 ribbon firmly latched and clear of wires, feed **`5V` (≥ 1 A)** and **`GND`** strictly from an isolated `5V` rail (never from the S3 `3V3` pin), confirm **zero** signal wires run to the ESP32-S3, and confirm `IO0` is **not** grounded in run mode.
 
 ---
 
@@ -401,20 +399,20 @@ All ESP32-S3 GPIO assignments below are validated against reserved N16R8 pins an
 | **VL53L0X (Forward ToF)** | `SDA` | **ESP32-S3 `GPIO4`** | Shared I²C (`0x29`) | `CONFIG_SENTRA_PIN_I2C_SDA=4` | F-to-M → SDA Hub | Shared with MPU6050 |
 | **VL53L0X (Forward ToF)** | `SCL` | **ESP32-S3 `GPIO40`** | Shared I²C (`0x29`) | `CONFIG_SENTRA_PIN_I2C_SCL=40` | F-to-M → SCL Hub | Shared with MPU6050 |
 | **VL53L0X (Forward ToF)** | `XSHUT` | *Not connected* | Shutdown | `CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT=-1` | None | Only if breakout has onboard pull-up |
-| **INMP441 Mic** | `VDD` | S3 `3V3` rail | Power (`3.3V` only) | `CONFIG_SENTRA_ENABLE_INMP441=y` | M-to-M (breadboard) | Never apply `5V` |
+| **INMP441 Mic** | `VDD` | S3 `3V3` rail | Power (`3.3V` only) | `CONFIG_SENTRA_ENABLE_INMP441_MIC=y` | M-to-M (breadboard) | Never apply `5V` |
 | **INMP441 Mic** | `GND` | S3 `GND` rail | Ground | — | M-to-M (breadboard) | Common ground |
-| **INMP441 Mic** | `L/R` | S3 `GND` rail | Channel select | `I2S_STD_SLOT_LEFT` | M-to-M (breadboard) | Selects Left mono slot |
+| **INMP441 Mic** | `L/R` | S3 `GND` rail | Channel select | `I2S_CHANNEL_FMT_ONLY_LEFT` | M-to-M (breadboard) | Selects Left mono slot |
 | **INMP441 Mic** | `SCK` | **ESP32-S3 `GPIO14`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_SCK=14` | M-to-M (breadboard) | Bit clock (`BCLK`) |
 | **INMP441 Mic** | `WS` | **ESP32-S3 `GPIO15`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_WS=15` | M-to-M (breadboard) | Word select (`LRCLK`) |
 | **INMP441 Mic** | `SD` | **ESP32-S3 `GPIO16`** | `I2S_NUM_0` RX | `CONFIG_SENTRA_PIN_INMP441_SD=16` | M-to-M (breadboard) | Serial mic data in |
-| **MAX98357A Amp** | `VIN` | S3 `3V3` rail (initial) | Power (`3.3V` start) | `CONFIG_SENTRA_ENABLE_MAX98357A=y` | M-to-M (breadboard) | Lower initial bench power |
+| **MAX98357A Amp** | `VIN` | S3 `3V3` rail (initial) | Power (`3.3V` start) | `CONFIG_SENTRA_ENABLE_MAX98357A_AMP=y` | M-to-M (breadboard) | Lower initial bench power |
 | **MAX98357A Amp** | `GND` | S3 `GND` rail | Ground | — | M-to-M (breadboard) | Common ground |
 | **MAX98357A Amp** | `BCLK` | **ESP32-S3 `GPIO17`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_BCLK=17` | M-to-M (breadboard) | Bit clock |
 | **MAX98357A Amp** | `LRC` | **ESP32-S3 `GPIO18`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_LRC=18` | M-to-M (breadboard) | Word clock |
 | **MAX98357A Amp** | `DIN` | **ESP32-S3 `GPIO21`** | `I2S_NUM_1` TX | `CONFIG_SENTRA_PIN_MAX98357A_DIN=21` | M-to-M (breadboard) | Serial audio data out |
 | **MAX98357A Amp** | `SD` / `GAIN` | Floating (`GAIN`: optional `100 kΩ` to `GND`) | Amp control | — | None / 100 kΩ | Do not ground `SD` |
 | **Speaker (Unverified)** | `+` / `-` | MAX98357A `+` / `-` | Bridged Class-D | — | **Disconnected until verified** | Verify Ω & W first; never ground leads |
-| **PTT Tactile Button** | Pin A / Pin B | **ESP32-S3 `GPIO5`** / `GND` rail | Active-low GPIO | `BOARD_PIN_PTT_BUTTON=5` | M-to-M (breadboard) | Internal pull-up; sends `X-Audio-Trigger: ptt` |
+| **PTT Tactile Button** | Pin A / Pin B | **ESP32-S3 `GPIO5`** / `GND` rail | Active-low GPIO | `CONFIG_SENTRA_PIN_ACTION_BUTTON=5` | M-to-M (breadboard) | Internal pull-up; press triggers 3.5 s capture (`X-Audio-Trigger: ptt`) |
 | **ESP32-CAM (Run Mode)** | `5V` / `GND` | Dedicated `5V` (≥ 1 A) / `GND` | Wi-Fi HTTP (`esp32`) | `firmware/esp32cam` | Power only (**0 wires to S3**) | Pairs with S3 in backend via `SENTRA_CAMERA_PAIRINGS` |
 | **ESP32-CAM (Flash Mode)** | `U0R` / `U0T` / `IO0` | USB-UART `TX` / `RX` / temp `GND` | UART0 Flash | `GPIO3` / `GPIO1` / `GPIO0` | Flash cable only | Remove `IO0 ↔ GND` after flashing & press `RST` |
 
@@ -443,7 +441,7 @@ CONFIG_SENTRA_PIN_VL53L0X_FWD_XSHUT=-1
 | **Internal Pull-Ups** | **`GPIO_PULLUP_ENABLE`** on `SDA` & `SCL` | `firmware/esp32s3/src/i2c_bus.c` | Enabled in driver alongside breakout board pull-up resistors |
 | **VL53L0X Address** | **`0x29`** | `CONFIG_SENTRA_VL53L0X_ADDR` / `BOARD_ADDR_VL53L0X_FWD` | Single forward ToF sensor; `XSHUT = -1` assumes onboard pull-up |
 | **MPU6050 Address** | **`0x68`** | `AD0` tied to `GND` (`i2c_bus.c` boot scan) | If `AD0` floats or is tied high, MPU6050 shifts to `0x69` and will not match |
-| **Boot I²C Scan** | Scans `0x03–0x77` at startup | `i2c_bus.c` | Logs `VL53L0X@0x29=OK/MISSING` and `MPU6050@0x68=OK/MISSING` before telemetry starts |
+| **Boot I²C Scan** | Scans `0x08–0x77` at startup | `i2c_bus.c` | Logs `VL53L0X@0x29=FOUND/MISSING` and `MPU6050@0x68=FOUND/MISSING` before telemetry starts |
 
 > **Fail-Closed Sensor Rule:** Absent, invalid, or expired VL53L0X/MPU6050 readings are never promoted as live or clear-path evidence. If either address is missing on the boot I²C scan, inspect the F-to-M jumpers (`SDA=GPIO4`, `SCL=GPIO40`, `AD0=GND`, and VL53L0X `XSHUT` pull-up) before continuing.
 
@@ -458,6 +456,7 @@ Enforced by `SENTRA_PIN_IS_N16R8_RESERVED(p)` in `firmware/esp32s3/include/board
 - **`GPIO 26–32`** — Internal Quad SPI Flash
 - **`GPIO 33–37`** — Internal 8 MB Octal SPI PSRAM (N16R8)
 - **`GPIO 43, 44`** — `UART0` TX/RX serial monitor
+- **Also avoid `GPIO 38 / 48`:** Connected to the onboard RGB LED on many ESP32-S3-DevKitC-1 clones.
 
 ---
 
@@ -486,7 +485,7 @@ SENTRA_LIVE_MODEL="gemini-3.8-live"
 1. **Stage 1 — S3 + Tethered I²C Sensors Only:** Wire only `3.3V`, `GND`, `GY-521`, and `VL53L0X`. Flash `firmware/esp32s3` with `sdkconfig.defaults`. Confirm boot I²C scan detects **`0x29`** and **`0x68`**, then verify stationary `[BENCH]` distance (measured with a ruler) and IMU tilt changes.
 2. **Stage 2 — Separate ESP32-CAM:** Flash `firmware/esp32cam` separately. Run the local serial JPEG capture test first, then verify authenticated frame uploads to `POST /api/device/frame` and backend pairing via `SENTRA_CAMERA_PAIRINGS`.
 3. **Stage 3 — Add INMP441 Mic + PTT (Speaker Still Disconnected):** Wire `INMP441` (`GPIO14/15/16`, `L/R=GND`, `VDD=3.3V`) and PTT (`GPIO5 ↔ GND`). Build/flash with `sdkconfig.defaults;sdkconfig.defaults.audio_bench` and confirm non-zero mic RMS levels in serial logs.
-4. **Stage 4 — Add MAX98357A + Verified Speaker:** Confirm speaker impedance (4 Ω or 8 Ω) and wattage rating, wire `MAX98357A` (`GPIO17/18/21`, `VIN=3.3V`) and speaker `+`/`-`. Build/flash with `sdkconfig.defaults;sdkconfig.defaults.wearable_full`, hold PTT to speak, release, and verify the **`gemini-3.8-live`** voice reply plays through the speaker.
+4. **Stage 4 — Add MAX98357A + Verified Speaker:** Confirm speaker impedance (4 Ω or 8 Ω) and wattage rating, wire `MAX98357A` (`GPIO17/18/21`, `VIN=3.3V`) and speaker `+`/`-`. Build/flash with `sdkconfig.defaults;sdkconfig.defaults.wearable_full`, press PTT to start a 3.5 s recording, speak your question, and verify the **`gemini-3.8-live`** voice reply plays through the speaker.
 
 ---
 

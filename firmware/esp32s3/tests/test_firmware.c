@@ -332,7 +332,7 @@ static void test_9_optional_audio_disabled(void) {
     assert(local_alerts_is_available() == false);
     assert(local_alerts_play(SENTRA_ALERT_OBSTACLE_CLOSE) == ESP_ERR_NOT_SUPPORTED);
     assert(local_alerts_play(SENTRA_ALERT_DISCONNECTED) == ESP_ERR_NOT_SUPPORTED);
-#ifdef CONFIG_SENTRA_ENABLE_MAX98357A
+#if defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) || defined(CONFIG_SENTRA_ENABLE_MAX98357A)
     /* Discrete MAX98357A enables speaker output availability without WM8960 */
     local_alerts_set_audio_ready(true);
     assert(local_alerts_is_available() == true);

@@ -181,7 +181,7 @@ esp_err_t audio_http_upload_utterance(const uint8_t *wav_buffer, size_t wav_len,
 }
 
 esp_err_t audio_http_fetch_and_play_reply(const char *reply_id) {
-#if !defined(CONFIG_SENTRA_ENABLE_MAX98357A) && !defined(CONFIG_SENTRA_ENABLE_WM8960)
+#if !defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) && !defined(CONFIG_SENTRA_ENABLE_MAX98357A) && !defined(CONFIG_SENTRA_ENABLE_WM8960)
     (void)reply_id;
     return ESP_ERR_NOT_SUPPORTED;
 #else
