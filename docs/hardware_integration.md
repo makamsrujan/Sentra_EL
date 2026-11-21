@@ -487,3 +487,185 @@ SENTRA_LIVE_MODEL="gemini-3.8-live"
 2. **Stage 2 — Separate ESP32-CAM:** Flash `firmware/esp32cam` separately. Run the local serial JPEG capture test first, then verify authenticated frame uploads to `POST /api/device/frame` and backend pairing via `SENTRA_CAMERA_PAIRINGS`.
 3. **Stage 3 — Add INMP441 Mic + PTT (Speaker Still Disconnected):** Wire `INMP441` (`GPIO14/15/16`, `L/R=GND`, `VDD=3.3V`) and PTT (`GPIO5 ↔ GND`). Build/flash with `sdkconfig.defaults;sdkconfig.defaults.audio_bench` and confirm non-zero mic RMS levels in serial logs.
 4. **Stage 4 — Add MAX98357A + Verified Speaker:** Confirm speaker impedance (4 Ω or 8 Ω) and wattage rating, wire `MAX98357A` (`GPIO17/18/21`, `VIN=3.3V`) and speaker `+`/`-`. Build/flash with `sdkconfig.defaults;sdkconfig.defaults.wearable_full`, hold PTT to speak, release, and verify the **`gemini-3.8-live`** voice reply plays through the speaker.
+
+---
+
+## 8. Firmware Flashing Procedures, ESP-IDF v5.3 Environment & Power-On Sequence
+
+> **Reminder:** Never commit generated `sdkconfig` files, Wi-Fi passwords, or provisioned `X-Device-Token` secrets to Git (they are excluded by `.gitignore`). Flash and verify each board on its own target — **`esp32s3`** for the main controller and **`esp32`** for the separate ESP32-CAM.
+
+### 8.1 Required ESP-IDF v5.3 Environment Configuration
+
+Both firmware projects target **ESP-IDF `release/v5.3`** (matching `.github/workflows/verify.yml`):
+
+1. **Install & Export ESP-IDF v5.3** in every new terminal session before running `idf.py`:
+   ```bash
+   # Linux / macOS
+   source "$HOME/esp/esp-idf/export.sh"
+
+   # Windows (ESP-IDF 5.3 PowerShell or CMD)
+   # $HOME\esp\esp-idf\export.ps1
+
+   # Confirm version (must report v5.3.x)
+   idf.py --version
+   ```
+2. **USB Serial Drivers & Permissions:**
+   - Ensure CP210x / CH340 drivers (for USB-UART adapters or ESP32-CAM-MB) and native USB-Serial/JTAG support (for ESP32-S3) are available.
+   - On Linux, verify your user is in the `dialout` (or `uucp`) group so `/dev/ttyACM*` and `/dev/ttyUSB*` are writable.
+3. **Target-Specific `sdkconfig.defaults` Requirements (Pre-Configured in Repo):**
+
+| Parameter | ESP32-S3 (`firmware/esp32s3/sdkconfig.defaults`) | ESP32-CAM (`firmware/esp32cam/sdkconfig.defaults`) |
+| --- | --- | --- |
+| **IDF Target** | `CONFIG_IDF_TARGET="esp32s3"` | `CONFIG_IDF_TARGET="esp32"` |
+| **Flash Size** | `CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y` (N16R8) | `CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y` |
+| **PSRAM Mode** | `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_MODE_OCT=y`, `CONFIG_SPIRAM_SPEED_80M=y` | `CONFIG_SPIRAM=y`, `CONFIG_SPIRAM_USE_MALLOC=y`, `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` |
+| **TLS Root CAs** | `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` | `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` |
+| **Default Device ID** | `ESP32-S3-SENTRA-001` | `ESP32-CAM-SENTRA-001` *(must remain distinct from S3)* |
+| **Disabled Legacy / Defaults** | `CAMERA=n`, `WM8960=n`, `AUDIO_I2S_DISCRETE=n`, `VL53L5CX=n` | `ENABLE_FLASH_LED=n` (avoids glare & power brownouts) |
+
+4. **Pre-Register Both Boards on the Backend Before Flashing Wi-Fi Credentials:**
+   Register `ESP32-S3-SENTRA-001` and `ESP32-CAM-SENTRA-001` separately via `POST /api/device/register` (using `X-Operator-Token`) to obtain two **independent** `provisionedToken` values, and set `SENTRA_CAMERA_PAIRINGS="ESP32-S3-SENTRA-001=ESP32-CAM-SENTRA-001"` in `.env`.
+
+---
+
+### 8.2 Flashing Procedure — ESP32-S3 N16R8 (`firmware/esp32s3`)
+
+#### A. Stage 1 — Sensor Bench Firmware (Default Profile)
+
+```bash
+cd firmware/esp32s3
+rm -f sdkconfig
+idf.py set-target esp32s3
+idf.py menuconfig
+```
+
+In **`SENTRA firmware configuration`**, configure:
+- `SENTRA_WIFI_SSID` and `SENTRA_WIFI_PASSWORD` *(leave blank only if doing an offline serial I²C/[BENCH] test first)*
+- `SENTRA_BACKEND_URL` (e.g., `http://<LAN_IP>:3000` or your `https://` backend origin)
+- `SENTRA_DEVICE_ID` (`ESP32-S3-SENTRA-001`)
+- `SENTRA_DEVICE_TOKEN` *(the S3's own provisioned token)*
+- Confirm under **Step 1: S3 Bench Sensors**: `SDA=4`, `SCL=40`, `I2C_FREQ_HZ=100000`, `VL53L0X_ADDR=0x29`, `VL53L0X_FWD_XSHUT=-1`.
+
+Build, flash, and monitor:
+
+```bash
+idf.py build
+idf.py -p <S3_SERIAL_PORT> flash monitor
+```
+
+*(If auto-reset into download mode fails, hold `BOOT`, tap `RST`, release `BOOT`, and re-run `idf.py -p <S3_SERIAL_PORT> flash`.)*
+
+Verify in serial logs:
+- 8 MB Octal PSRAM initializes without error.
+- Boot I²C scan reports **`0x29` (VL53L0X)** and **`0x68` (MPU6050)**.
+- `[BENCH]` readouts report valid distances (and `UNAVAILABLE` / `null` when out of range) plus `calibrated: true` for IMU with `heading: null`.
+- Once Wi-Fi and token are configured, telemetry uploads return HTTP `200` on `POST /api/device/telemetry`.
+
+#### B. Stage 3 & Stage 4 — Audio Overlays (Only After Stage 1 Passes)
+
+- **Stage 3 (INMP441 Mic Bench Only — Speaker Still Disconnected):**
+  ```bash
+  cd firmware/esp32s3
+  rm -f sdkconfig
+  idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.audio_bench" set-target esp32s3
+  idf.py menuconfig   # Re-enter Wi-Fi/backend/token; optionally enable SENTRA_AUDIO_BENCH_TEST_MIC
+  idf.py build
+  idf.py -p <S3_SERIAL_PORT> flash monitor
+  ```
+- **Stage 4 (Full Wearable — ONLY After Speaker Impedance Ω & Wattage W Are Confirmed):**
+  ```bash
+  cd firmware/esp32s3
+  rm -f sdkconfig
+  idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.wearable_full" set-target esp32s3
+  idf.py menuconfig   # Re-enter Wi-Fi/backend/token; confirm MAX98357A pins 17/18/21
+  idf.py build
+  idf.py -p <S3_SERIAL_PORT> flash monitor
+  ```
+
+---
+
+### 8.3 Flashing Procedure — Separate ESP32-CAM (`firmware/esp32cam`)
+
+> **Target Warning:** `firmware/esp32cam` targets the original **`esp32`** chip — **do not** run `set-target esp32s3`.
+
+#### Pass 1 — Local Serial JPEG Verification (No Wi-Fi / No Token First)
+
+1. Connect the ESP32-CAM via an **ESP32-CAM-MB** USB base, or wire a 3.3V USB-UART adapter (`5V`, `GND`, `TX → U0R`, `RX → U0T`) and connect the temporary **`IO0 ↔ GND`** jumper, then tap **`RST`**.
+2. Build and flash with default (blank) Wi-Fi/token settings:
+   ```bash
+   cd firmware/esp32cam
+   rm -f sdkconfig
+   idf.py set-target esp32
+   idf.py build
+   idf.py -p <CAM_SERIAL_PORT> flash
+   ```
+3. **Remove the `IO0 ↔ GND` jumper** (skip if using ESP32-CAM-MB auto-reset), press **`RST`**, and open the serial monitor:
+   ```bash
+   idf.py -p <CAM_SERIAL_PORT> monitor
+   ```
+4. Confirm OV2640 initializes on the AI-Thinker first-candidate profile and logs `[LOCAL_JPEG_TEST]` frames with `valid_soi_eoi=YES` (`FF D8 ... FF D9`) and no brownout resets.
+
+#### Pass 2 — Authenticated Wi-Fi JPEG Upload
+
+1. Open menuconfig and navigate to **`SENTRA ESP32-CAM Sender Configuration`**:
+   ```bash
+   idf.py menuconfig
+   ```
+   Configure:
+   - `SENTRA_CAM_WIFI_SSID` and `SENTRA_CAM_WIFI_PASSWORD`
+   - `SENTRA_CAM_BACKEND_URL` (same backend origin as the S3)
+   - `SENTRA_CAM_DEVICE_ID` (`ESP32-CAM-SENTRA-001` — distinct from S3)
+   - `SENTRA_CAM_DEVICE_TOKEN` *(the ESP32-CAM's own provisioned token — never reuse the S3 token)*
+   - Keep `SENTRA_CAM_FRAMESIZE_QVGA` (`320x240`) and `SENTRA_CAM_ENABLE_FLASH_LED=n` for initial bench bring-up.
+2. Reconnect `IO0 ↔ GND` (if using USB-UART), tap `RST`, and flash:
+   ```bash
+   idf.py build
+   idf.py -p <CAM_SERIAL_PORT> flash
+   ```
+3. Remove `IO0 ↔ GND`, press `RST`, and confirm in `idf.py -p <CAM_SERIAL_PORT> monitor` that the board obtains a Wi-Fi IP, logs a fresh `boot_session=cam-...`, and receives HTTP `200` on `POST /api/device/frame?deviceId=ESP32-CAM-SENTRA-001`.
+
+---
+
+### 8.4 Exact Post-Wiring Power-On Sequence
+
+After completing all physical wiring and flashing both boards, **always power on the system in this exact order**:
+
+1. **Step 0 — Pre-Power Dead-Circuit Check (All Power Disconnected):**
+   - Visually verify (or continuity-check with a multimeter) that the breadboard **`3.3V` rail and `GND` rail are not shorted**.
+   - Verify the **ESP32-CAM `5V` supply is completely isolated** from the breadboard `3.3V` rail and that **zero data wires** link the ESP32-CAM to the ESP32-S3.
+   - Verify **`INMP441 VDD` is on `3.3V` only** (never `5V`) and **`L/R` is tied to `GND`**.
+   - Verify **ESP32-CAM `IO0` is open/ungrounded** (run mode).
+   - Verify the **speaker remains disconnected** from `MAX98357A + / -` unless its impedance (Ω) and wattage (W) have already been confirmed for Stage 4.
+   - Verify both mobile F-to-M sensor harnesses (`GY-521` and `VL53L0X`) are firmly seated, strain-relieved, and resting flat/stationary for boot calibration.
+
+2. **Step 1 — Start the SENTRA Backend Server First:**
+   - Ensure `.env` includes `SENTRA_CAMERA_PAIRINGS="ESP32-S3-SENTRA-001=ESP32-CAM-SENTRA-001"`, both device IDs are registered, and the backend is running.
+   - Verify readiness before energizing either board:
+     ```bash
+     curl -s http://localhost:3000/api/health
+     ```
+     Confirm `databaseAvailable: true` and `"ESP32-S3-SENTRA-001": "ESP32-CAM-SENTRA-001"` in `cameraPairings`.
+
+3. **Step 2 — Power On Board 1: ESP32-S3 N16R8 (+ Breadboard `3.3V` Rail & Mobile Sensors):**
+   - Plug USB-C power into the **ESP32-S3 N16R8**. This energizes the `3.3V` rail, `GY-521 (MPU6050)`, `VL53L0X`, and stationary S3 audio modules simultaneously.
+   - **Keep the `GY-521 (MPU6050)` completely still for ~2 seconds** immediately after power-on so gyroscope bias calibration completes cleanly (`calibrated: true`).
+   - Wait for confirmation that the S3 sensor controller is healthy and streaming before powering the camera:
+     - Boot I²C scan detects `0x29` and `0x68` (if monitoring over USB).
+     - `GET /api/device/status?deviceId=ESP32-S3-SENTRA-001` reports `connected: true` with live `forwardDistanceCm` and IMU telemetry.
+
+4. **Step 3 — Power On Board 2: Separate ESP32-CAM (Dedicated `5V`, ≥ 1 A Supply):**
+   - Connect the dedicated **`5V` (≥ 1 A)** power source to the **ESP32-CAM** (via its ESP32-CAM-MB USB cable or isolated `5V`/`GND` supply — never from the S3 `3V3` pin).
+   - Allow 3–5 seconds for OV2640 init, Wi-Fi join, and initial `X-Boot-Session` JPEG upload.
+   - Verify independent health and backend pairing:
+     - `GET /api/device/status?deviceId=ESP32-CAM-SENTRA-001` reports `connected: true` and `frameAvailable: true`.
+     - `GET /api/device/frame/status?deviceId=ESP32-S3-SENTRA-001` reports `frameAvailable: true`, `stale: false`, and `connectionStatus: "hardware"`.
+     - `GET /api/device/frame/latest?deviceId=ESP32-S3-SENTRA-001` returns HTTP `200` (`image/jpeg`) with headers `X-Device-Id: ESP32-S3-SENTRA-001` and `X-Camera-Device-Id: ESP32-CAM-SENTRA-001`.
+
+5. **Step 4 — Open the SENTRA Companion Web App:**
+   - Open the web app and select `ESP32-S3-SENTRA-001` to view combined S3 sensor telemetry and paired ESP32-CAM frames (and test PTT voice turns once Stage 3/4 audio is enabled).
+
+#### Safe Power-Down Order (Reverse)
+1. Disconnect **ESP32-CAM `5V` power** first.
+2. Disconnect **ESP32-S3 USB-C power** second.
+3. Only modify breadboard jumpers, mobile F-to-M sensor leads, or speaker connections once **both** boards are completely unpowered.
+
