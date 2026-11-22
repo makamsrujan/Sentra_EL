@@ -453,13 +453,13 @@ static void test_12_telemetry_serialization_missing_and_valid(int dump_json) {
 static void test_13_discrete_audio_i2s_and_pin_profile(void) {
     /* Bench sensor profile constants */
     assert(BOARD_PIN_I2C_SDA == 4);
-    assert(BOARD_PIN_I2C_SCL == 40);
+    assert(BOARD_PIN_I2C_SCL == 7);
     assert(BOARD_PIN_VL53L0X_FWD_XSHUT == -1);
 
     /* INMP441 24-bit MSB-aligned word -> clamped 16-bit PCM */
     assert(i2s_audio_convert_inmp441_sample(0) == 0);
-    assert(i2s_audio_convert_inmp441_sample(16384 << 14) == 16384);
-    assert(i2s_audio_convert_inmp441_sample(-(12000 << 14)) == -12000);
+    assert(i2s_audio_convert_inmp441_sample(16384 << 16) == 16384);
+    assert(i2s_audio_convert_inmp441_sample(-(12000 << 16)) == -12000);
     assert(i2s_audio_convert_inmp441_sample(0x7FFFFFFF) == 32767);
     assert(i2s_audio_convert_inmp441_sample((int32_t)0x80000000U) == -32768);
 

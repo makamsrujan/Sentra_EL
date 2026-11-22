@@ -48,7 +48,7 @@ extern "C" {
 #ifdef CONFIG_SENTRA_PIN_I2C_SCL
 #define BOARD_PIN_I2C_SCL               CONFIG_SENTRA_PIN_I2C_SCL
 #else
-#define BOARD_PIN_I2C_SCL               40
+#define BOARD_PIN_I2C_SCL               7
 #endif
 
 #ifdef CONFIG_SENTRA_I2C_FREQ_HZ
