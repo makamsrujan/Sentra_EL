@@ -64,7 +64,9 @@ void i2s_audio_write_wav_header(uint8_t *header, uint32_t data_len, uint32_t sam
 #include "driver/i2s.h"
 
 static const char *TAG = "I2S_AUDIO";
+#if defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) || defined(CONFIG_SENTRA_ENABLE_WM8960)
 static volatile bool s_playback_abort_requested = false;
+#endif
 static bool s_mic_ready = false;
 static bool s_speaker_ready = false;
 
@@ -296,6 +298,7 @@ esp_err_t i2s_audio_record_wav(uint8_t *buffer, size_t max_buffer_size, uint32_t
     return ESP_OK;
 }
 
+#if defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) || defined(CONFIG_SENTRA_ENABLE_WM8960)
 esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sample_rate) {
     if (!s_speaker_ready) return ESP_ERR_INVALID_STATE;
     if (!audio_data || data_len == 0) return ESP_ERR_INVALID_ARG;
@@ -386,5 +389,16 @@ esp_err_t i2s_audio_play_bench_tone(uint32_t freq_hz, uint32_t duration_ms, int1
 void i2s_audio_abort_playback(void) {
     s_playback_abort_requested = true;
 }
+#else
+esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sample_rate) {
+    (void)audio_data; (void)data_len; (void)sample_rate;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+esp_err_t i2s_audio_play_bench_tone(uint32_t freq_hz, uint32_t duration_ms, int16_t amplitude) {
+    (void)freq_hz; (void)duration_ms; (void)amplitude;
+    return ESP_ERR_NOT_SUPPORTED;
+}
+void i2s_audio_abort_playback(void) {}
+#endif
 
 #endif /* ESP_PLATFORM */
