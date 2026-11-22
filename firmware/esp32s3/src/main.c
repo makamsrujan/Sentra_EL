@@ -277,7 +277,7 @@ static void sensor_safety_task(void *pvParameters) {
         /* Periodic stationary bench readout over serial monitor (never fabricates missing sensors) */
         if (now_ms - last_bench_log_ms >= 2000) {
             last_bench_log_ms = now_ms;
-            sentra_imu_sample_t imu_sample = {0};
+            sentra_mpu_sample_t imu_sample = {0};
             bool imu_ok = s_imu_ready && (sentra_mpu6050_read(I2C_NUM_0, &imu_sample) == ESP_OK) && imu_sample.valid;
 
             char tof_str[48];
@@ -298,8 +298,8 @@ static void sensor_safety_task(void *pvParameters) {
             }
 
             if (imu_ok) {
-                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg roll=%.1f deg motion=%.2f cal=%s | Batt: %s",
-                         tof_str, (double)imu_sample.pitch_deg, (double)imu_sample.roll_deg,
+                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg motion=%.2f cal=%s | Batt: %s",
+                         tof_str, (double)imu_sample.pitch_deg,
                          (double)imu_sample.motion_magnitude,
                          sentra_mpu6050_is_calibrated() ? "yes" : "no",
                          batt_str);
