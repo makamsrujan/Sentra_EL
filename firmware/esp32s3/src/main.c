@@ -77,9 +77,11 @@ static void set_audio_state(sentra_audio_state_t new_state) {
 }
 
 static void init_button(void) {
-    if (SENTRA_PIN_ACTION_BUTTON < 0) return;
+    const int button_pin = SENTRA_PIN_ACTION_BUTTON;
+    if (button_pin < 0 || button_pin >= 64 ||
+        !GPIO_IS_VALID_GPIO(button_pin)) return;
     gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << SENTRA_PIN_ACTION_BUTTON),
+        .pin_bit_mask = (1ULL << button_pin),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -97,6 +99,7 @@ static void run_optional_audio_bench_tests(void) {
         if (!buf) buf = (uint8_t *)malloc(alloc_size);
         if (buf) {
             size_t wav_len = 0;
+            vTaskDelay(pdMS_TO_TICKS(2000));
             ESP_LOGI(TAG, "[AUDIO BENCH] Recording 1000 ms sample from INMP441...");
             if (i2s_audio_record_wav(buf, alloc_size, 1000, &wav_len) == ESP_OK && wav_len > 44) {
                 const int16_t *samples = (const int16_t *)(buf + 44);
@@ -277,7 +280,7 @@ static void sensor_safety_task(void *pvParameters) {
         /* Periodic stationary bench readout over serial monitor (never fabricates missing sensors) */
         if (now_ms - last_bench_log_ms >= 2000) {
             last_bench_log_ms = now_ms;
-            sentra_imu_sample_t imu_sample = {0};
+            sentra_mpu_sample_t imu_sample = {0};
             bool imu_ok = s_imu_ready && (sentra_mpu6050_read(I2C_NUM_0, &imu_sample) == ESP_OK) && imu_sample.valid;
 
             char tof_str[48];
@@ -298,8 +301,8 @@ static void sensor_safety_task(void *pvParameters) {
             }
 
             if (imu_ok) {
-                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg roll=%.1f deg motion=%.2f cal=%s | Batt: %s",
-                         tof_str, (double)imu_sample.pitch_deg, (double)imu_sample.roll_deg,
+                ESP_LOGI(TAG, "[BENCH] VL53L0X: %s | MPU6050: pitch=%.1f deg motion=%.2f cal=%s | Batt: %s",
+                         tof_str, (double)imu_sample.pitch_deg,
                          (double)imu_sample.motion_magnitude,
                          sentra_mpu6050_is_calibrated() ? "yes" : "no",
                          batt_str);
@@ -347,6 +350,9 @@ static void camera_upload_task(void *argument) {
 #endif
 
 void app_main(void) {
+    ESP_LOGW("RESET_DIAG", "Boot reset reason: %d",
+             (int)esp_reset_reason());
+
     ESP_LOGI(TAG, "Starting SENTRA S3 Sensor Controller %s (ESP32-S3 N16R8)...", SENTRA_FIRMWARE_VERSION);
     ESP_LOGI(TAG, "Bench I2C config: SDA=GPIO%d, SCL=GPIO%d, freq=%u Hz, VL53L0X_XSHUT=%d",
              SENTRA_PIN_I2C_SDA, SENTRA_PIN_I2C_SCL, (unsigned)SENTRA_I2C_FREQ_HZ, SENTRA_PIN_TOF_FWD_XSHUT);

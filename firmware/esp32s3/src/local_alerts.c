@@ -75,7 +75,7 @@ esp_err_t local_alerts_play(sentra_local_alert_type_t alert_type) {
 
     i2s_audio_abort_playback();
     /* Conservative amplitude for small mono speakers driven by MAX98357A */
-    const float safe_amplitude = 3500.0f;
+    const float safe_amplitude = 4000.0f;
     int16_t tone_buf[1024];
 
     switch (alert_type) {

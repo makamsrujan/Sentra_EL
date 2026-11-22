@@ -12,9 +12,9 @@
 #include <string.h>
 
 int16_t i2s_audio_convert_inmp441_sample(int32_t raw_i2s_word) {
-    /* INMP441 shifts 24-bit signed audio in bits [31:8]; shifting right by 14 preserves
-     * usable conversational gain while clamping safely into int16_t bounds. */
-    int32_t scaled = raw_i2s_word >> 14;
+    /* INMP441 provides signed 24-bit audio in bits [31:8].
+     * Shift by 16 to convert to signed 16-bit PCM. */
+    int32_t scaled = raw_i2s_word >> 16;
     if (scaled > 32767) return 32767;
     if (scaled < -32768) return -32768;
     return (int16_t)scaled;
@@ -297,6 +297,9 @@ esp_err_t i2s_audio_record_wav(uint8_t *buffer, size_t max_buffer_size, uint32_t
 }
 
 esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sample_rate) {
+#if !defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) && !defined(CONFIG_SENTRA_ENABLE_WM8960)
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     if (!s_speaker_ready) return ESP_ERR_INVALID_STATE;
     if (!audio_data || data_len == 0) return ESP_ERR_INVALID_ARG;
 
@@ -314,8 +317,6 @@ esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sa
     const i2s_port_t tx_port = I2S_SPEAKER_PORT;
 #elif defined(CONFIG_SENTRA_ENABLE_WM8960)
     const i2s_port_t tx_port = I2S_LEGACY_PORT;
-#else
-    return ESP_ERR_NOT_SUPPORTED;
 #endif
 
     i2s_set_clk(tx_port, sample_rate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
@@ -340,14 +341,18 @@ esp_err_t i2s_audio_play(const uint8_t *audio_data, size_t data_len, uint32_t sa
 
     i2s_zero_dma_buffer(tx_port);
     return ESP_OK;
+#endif
 }
 
 esp_err_t i2s_audio_play_bench_tone(uint32_t freq_hz, uint32_t duration_ms, int16_t amplitude) {
+#if !defined(CONFIG_SENTRA_ENABLE_MAX98357A_AMP) && !defined(CONFIG_SENTRA_ENABLE_WM8960)
+    return ESP_ERR_NOT_SUPPORTED;
+#else
     if (!s_speaker_ready) return ESP_ERR_INVALID_STATE;
     if (freq_hz < 100 || freq_hz > 4000 || duration_ms == 0 || duration_ms > 2000) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (amplitude > 4000) amplitude = 4000; /* Cap bench test amplitude for unverified small speaker safety */
+    if (amplitude > 2000) amplitude = 2000; /* Cap bench test amplitude for unverified small speaker safety */
     if (amplitude < 0) amplitude = 0;
 
     const uint32_t sample_rate = 16000;
@@ -358,8 +363,6 @@ esp_err_t i2s_audio_play_bench_tone(uint32_t freq_hz, uint32_t duration_ms, int1
     const i2s_port_t tx_port = I2S_SPEAKER_PORT;
 #elif defined(CONFIG_SENTRA_ENABLE_WM8960)
     const i2s_port_t tx_port = I2S_LEGACY_PORT;
-#else
-    return ESP_ERR_NOT_SUPPORTED;
 #endif
 
     i2s_set_clk(tx_port, sample_rate, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_MONO);
@@ -381,6 +384,7 @@ esp_err_t i2s_audio_play_bench_tone(uint32_t freq_hz, uint32_t duration_ms, int1
 
     i2s_zero_dma_buffer(tx_port);
     return ESP_OK;
+#endif
 }
 
 void i2s_audio_abort_playback(void) {

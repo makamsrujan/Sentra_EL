@@ -48,7 +48,7 @@ config SENTRA_PIN_I2C_SDA
 
 config SENTRA_PIN_I2C_SCL
     int "Shared I2C SCL GPIO (bench default: 40)"
-    default 40
+    default 7
 
 config SENTRA_I2C_FREQ_HZ
     int "Shared I2C bus clock in Hz (100000 conservative for bench/harness)"
@@ -64,7 +64,7 @@ config SENTRA_PIN_VL53L0X_FWD_XSHUT
 
 config SENTRA_PIN_ACTION_BUTTON
     int "User action / PTT GPIO (-1 to disable)"
-    default 5
+    default -1
 
 config SENTRA_ENABLE_BATTERY_ADC
     bool "Enable ESP32-S3 ADC1 battery voltage monitor (requires external voltage divider <= 3.3V)"

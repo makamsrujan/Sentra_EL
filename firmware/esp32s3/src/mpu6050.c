@@ -83,7 +83,13 @@ esp_err_t sentra_mpu6050_init(i2c_port_t bus) {
     uint8_t who = 0;
     esp_err_t err = sentra_i2c_read_regs(bus, MPU_ADDR, MPU_REG_WHO_AM_I, &who, 1);
     if (err != ESP_OK) return err;
-    if ((who & 0x7E) != 0x68) return ESP_ERR_INVALID_RESPONSE;
+    ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", (unsigned int)who);
+    if ((who & 0x7E) != 0x68 && who != 0x74)
+        return ESP_ERR_INVALID_RESPONSE;
+
+    if (who == 0x74) {
+        ESP_LOGW(TAG, "MPU variant 0x74 detected; testing compatible mode");
+    }
 
     err = sentra_i2c_write_reg8(bus, MPU_ADDR, MPU_REG_PWR_MGMT_1, 0x01); /* PLL with X gyro ref */
     if (err != ESP_OK) return err;

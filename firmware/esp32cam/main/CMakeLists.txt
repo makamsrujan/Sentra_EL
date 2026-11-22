@@ -14,4 +14,6 @@ idf_component_register(
         driver
         mbedtls
         esp32-camera
+    PRIV_REQUIRES
+        esp_psram
 )
