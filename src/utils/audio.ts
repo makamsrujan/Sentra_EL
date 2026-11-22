@@ -163,6 +163,13 @@ export function speakText(
       ? { rate: rateOrOptions, onEnd: legacyOnEnd }
       : { ...rateOrOptions, onEnd: rateOrOptions.onEnd ?? legacyOnEnd };
 
+  // SENTRA uses Gemini Live as its sole spoken voice. Keep this utility's
+  // signature for existing callers, but never start a competing browser TTS
+  // utterance. Visual analysis continues to update the UI normally.
+  // Nonverbal hazard chimes are handled separately by playChime().
+  opts.onEnd?.();
+  return;
+
   const cleanText = text?.trim() || '';
   if (!cleanText) {
     opts.onEnd?.();
