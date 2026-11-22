@@ -2,6 +2,8 @@
 
 let audioCtx: AudioContext | null = null;
 let audioMuted = false;
+// Single-voice policy: browser speech is disabled; Gemini Live owns spoken output.
+const geminiLiveOnlyVoice = true;
 let audioVolume = 0.9;
 let activeSpeechToken = 0;
 let activeEndSafetyTimer: ReturnType<typeof setTimeout> | null = null;
@@ -167,8 +169,10 @@ export function speakText(
   // signature for existing callers, but never start a competing browser TTS
   // utterance. Visual analysis continues to update the UI normally.
   // Nonverbal hazard chimes are handled separately by playChime().
-  opts.onEnd?.();
-  return;
+  if (geminiLiveOnlyVoice) {
+    opts.onEnd?.();
+    return;
+  }
 
   const cleanText = text?.trim() || '';
   if (!cleanText) {
