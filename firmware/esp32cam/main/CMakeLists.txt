@@ -4,6 +4,7 @@ idf_component_register(
         "cam_sender_logic.c"
     INCLUDE_DIRS
         "."
+    PRIV_REQUIRES esp_psram
     REQUIRES
         esp_wifi
         esp_event
